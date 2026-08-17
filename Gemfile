@@ -15,6 +15,10 @@ gem "puma", ">= 5.0"
 # Windows does not include zoneinfo files, so bundle the tzinfo-data gem
 gem "tzinfo-data", platforms: %i[ windows jruby ]
 
+# Ruby 3.4+ dropped csv from the default gems bundled with the interpreter
+# (CsvParser relies on stdlib CSV), so it must be declared explicitly here.
+gem "csv"
+
 # Use the database-backed adapters for Rails.cache, Active Job, and Action Cable
 gem "solid_cache"
 gem "solid_queue"
@@ -49,7 +53,12 @@ group :development, :test do
   gem "rubocop-rails-omakase", require: false
 
   gem "rspec-rails"
+
+  gem "rswag-specs"
 end
+
+gem "rswag-api"
+gem "rswag-ui"
 
 group :test do
   gem "webmock"
