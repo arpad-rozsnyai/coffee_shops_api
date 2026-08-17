@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Coffee Shops API</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #1b120b;
+        --card: #2a1c12;
+        --cream: #f4e3ce;
+        --tan: #d8b788;
+        --accent: #e08a3f;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: radial-gradient(circle at 50% 0%, #35240f, var(--bg) 60%);
+        color: var(--cream);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        text-align: center;
+        padding: 2rem;
+      }
+
+      .card {
+        max-width: 30rem;
+      }
+
+      .logo { width: 6.5rem; height: 6.5rem; }
+
+      .steam {
+        transform-origin: center bottom;
+        animation: rise 3s ease-in-out infinite;
+      }
+
+      .steam.s2 { animation-delay: .5s; }
+      .steam.s3 { animation-delay: 1s; }
+
+      @keyframes rise {
+        0%   { opacity: 0; transform: translateY(0) scaleY(1); }
+        30%  { opacity: .8; }
+        100% { opacity: 0; transform: translateY(-10px) scaleY(1.15); }
+      }
+
+      .eyebrow {
+        letter-spacing: .18em;
+        text-transform: uppercase;
+        font-size: .75rem;
+        color: var(--tan);
+        margin: 1.5rem 0 .5rem;
+      }
+
+      h1 {
+        margin: 0 0 .75rem;
+        font-size: 1.75rem;
+      }
+
+      p.tagline {
+        color: var(--tan);
+        line-height: 1.5;
+        margin: 0 0 2rem;
+      }
+
+      .cta {
+        display: inline-flex;
+        align-items: center;
+        gap: .5rem;
+        padding: .75rem 1.5rem;
+        border-radius: 999px;
+        background: var(--accent);
+        color: #1b120b;
+        font-weight: 600;
+        text-decoration: none;
+      }
+
+      .cta:hover { background: #f0a05f; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <svg class="logo" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A steaming cup of coffee">
+        <path class="steam s1" d="M22 6c-3 4 3 5 0 9" stroke="#d8b788" stroke-width="2" stroke-linecap="round"/>
+        <path class="steam s2" d="M32 4c-3 4 3 5 0 9" stroke="#d8b788" stroke-width="2" stroke-linecap="round"/>
+        <path class="steam s3" d="M42 6c-3 4 3 5 0 9" stroke="#d8b788" stroke-width="2" stroke-linecap="round"/>
+        <path d="M12 24h34v16c0 8-7.5 14-17 14s-17-6-17-14V24z" fill="#3d2314" stroke="#f4e3ce" stroke-width="2"/>
+        <path d="M46 28h4a6 6 0 0 1 0 12h-4" fill="none" stroke="#f4e3ce" stroke-width="2"/>
+        <ellipse cx="29" cy="24" rx="17" ry="3" fill="#e08a3f"/>
+        <rect x="6" y="50" width="46" height="4" rx="2" fill="#f4e3ce"/>
+      </svg>
+
+      <p class="eyebrow">You weren't supposed to find this</p>
+      <h1>Well, hello there, curious human ☕</h1>
+      <p class="tagline">
+        Behind every good cup of coffee is a slightly nerdy API quietly measuring the
+        distance to your nearest one. Welcome to the secret staff corner.
+      </p>
+
+      <%= link_to rswag_ui_path, class: "cta", target: "_blank", rel: "noopener noreferrer" do %>
+        Peek behind the counter (API docs) →
+      <% end %>
+    </main>
+  </body>
+</html>
