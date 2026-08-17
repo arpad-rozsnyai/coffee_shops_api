@@ -1,0 +1,7 @@
+Starbucks Seattle,47.6,-122.3
+,1.0,2.0
+Blank Coordinates,,2.0
+Non Numeric,abc,2.0
+Missing Trailing Field,1.0
+Valid Negative,-122.4,47.6
+Valid Decimal,12.3456,-98.7654

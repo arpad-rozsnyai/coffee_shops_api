@@ -1,0 +1,7 @@
+Starbucks Seattle,47.6,-122.3
+Starbucks Seattle2,47.6109,-122.4
+Starbucks SF,37.7,-122.4
+Starbucks Portland,0,0
+,1.0,2.0
+Non Numeric,abc,2.0
+Missing Trailing Field,1.0
