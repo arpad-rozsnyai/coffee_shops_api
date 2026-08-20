@@ -19,8 +19,6 @@ three are `Starbucks Seattle2`, `Starbucks Seattle`, `Starbucks SF`, in that ord
 
 - Ruby **3.2.1** (pinned in `.ruby-version` and `Gemfile`; managed here via [rvm](https://rvm.io))
 - Rails **8.1.3.1** (installed via Bundler, not a separate system install)
-- SQLite3 — used only for Rails' own infrastructure (Solid Queue/Cache/Cable), not for coffee shop
-  data; see [Why no database](#why-no-database-for-coffee-shop-data) below.
 
 ## Setup
 
@@ -192,7 +190,7 @@ and parses the CSV fresh, then selects and renders the result:
    (positional columns: `Name, X, Y`, no header row). Skips individually bad rows; raises
    `CsvParser::ParseError` only if the CSV itself is structurally broken.
 4. **`CoffeeShop`** (`app/models/coffee_shop.rb`) — plain Ruby value object (`name`, `x`, `y`,
-   `#distance_to(x, y)` via `Math.hypot`). Not ActiveRecord-backed.
+   `#distance_to(x, y)` via `Math.hypot`). This app has no database at all — no ActiveRecord.
 5. **`CoffeeShopRepository#all`** (`app/services/coffee_shop_repository.rb`) — wires the client and
    parser together: `parser.parse(client.fetch)`.
 6. **`NearestCoffeeShopsFinder#call(x:, y:)`** (`app/services/nearest_coffee_shops_finder.rb`) —
@@ -230,12 +228,14 @@ challenge defines — not geographic lat/long. Full floating-point precision is 
 pairing and sorting; rounding to four decimal places happens exactly once, at serialization — it's a
 presentation concern, not a computation one, so sort order is never affected by rounding.
 
-## Why no database (for coffee shop data)
+## Why no database
 
 The CSV is the authoritative, externally-owned source of truth, fetched fresh on every request —
 there's nothing for this app to persist an independent copy of, and no requirement to serve data the
-source no longer has. SQLite/`db/` exist only because Rails' Solid Queue/Cache/Cable adapters are
-database-backed by default; they're unrelated to the coffee shop domain.
+source no longer has. Rails 8 defaults to SQLite-backed ActiveRecord, Solid Queue/Cache/Cable, and
+Active Storage's `image_processing`/Thruster out of the box, but none of them are used by this app,
+so they (and `db/`, `config/database.yml`, `config/cable.yml`) have been removed rather than carried
+as dead weight.
 
 ## Why no geospatial gem
 

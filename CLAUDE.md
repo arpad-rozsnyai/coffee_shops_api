@@ -49,9 +49,11 @@ that hits the network needs a `stub_request` (see `spec/services/csv_client_spec
 
 ## Architecture
 
-**No database model for coffee shop data.** SQLite/`db/` exist only for Rails' own infrastructure
-(Solid Queue/Cache/Cable use DB-backed adapters); coffee shops are fetched from a remote CSV on each
-request and modeled as a plain Ruby object, not ActiveRecord.
+**No database, period.** ActiveRecord, ActiveJob, and ActionCable (and the Rails 8 defaults that ride
+along with them — `sqlite3`, `solid_cache`/`solid_queue`/`solid_cable`, `db/`, `config/database.yml`,
+`config/cable.yml`) have all been removed — nothing in this app persists, enqueues jobs, or uses
+websockets. Coffee shops are fetched from a remote CSV on each request and modeled as a plain Ruby
+object.
 
 **Request-time pipeline** (fetch → parse → [selection] → [render], each step decoupled and independently
 testable):
@@ -73,7 +75,8 @@ testable):
    below). A well-formed but empty feed returns an empty array — that's not an error, since
    there's no header line to make "zero shops" ambiguous with "broken feed".
 4. `CoffeeShop` (`app/models/coffee_shop.rb`) — plain Ruby value object (`name`, `x`, `y`,
-   `#distance_to(x, y)` via `Math.hypot`). Not an ActiveRecord model despite living in `app/models`.
+   `#distance_to(x, y)` via `Math.hypot`). There's no ActiveRecord in this app at all; it lives in
+   `app/models` purely by Zeitwerk convention.
    Returns full-precision distance; rounding to 4 decimals (per the contract) is a presentation-layer
    concern, not implemented here.
 5. `CoffeeShopRepository#all` (`app/services/coffee_shop_repository.rb`) — composes steps 2 and 3
