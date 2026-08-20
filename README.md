@@ -194,8 +194,8 @@ and parses the CSV fresh, then selects and renders the result:
 5. **`CoffeeShopRepository#all`** (`app/services/coffee_shop_repository.rb`) — wires the client and
    parser together: `parser.parse(client.fetch)`.
 6. **`NearestCoffeeShopsFinder#call(x:, y:)`** (`app/services/nearest_coffee_shops_finder.rb`) —
-   pairs every shop with its distance, sorts by `[distance, name]` (name breaks exact ties
-   deterministically), takes the nearest 3.
+   pairs every shop with its distance, takes the 3 nearest via a partial selection
+   (`min_by(MAX_RESULTS)`) on `[distance, name]` (name breaks exact ties deterministically).
 7. **`Api::V1::CoffeeShopsController#index`** (`app/controllers/api/v1/coffee_shops_controller.rb`) —
    validates params via `CoordinateValidator`, calls the finder, renders via
    `CoffeeShopDistanceSerializer`. Maps data-source failures to 503; validation failures render 400.

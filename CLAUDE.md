@@ -83,8 +83,9 @@ testable):
    (`parser.parse(client.fetch)`); the only place that wires `CsvClient` and `CsvParser` together.
 6. `NearestCoffeeShopsFinder#call(x:, y:)` (`app/services/nearest_coffee_shops_finder.rb`) — asks the
    repository for all shops, pairs each with `{ coffee_shop:, distance: }` via `CoffeeShop#distance_to`,
-   sorts by `[distance, name]` (name as a tiebreaker for deterministic ordering — `sort_by` isn't
-   guaranteed stable), and takes the first 3.
+   and takes the 3 nearest via `min_by(MAX_RESULTS) { [distance, name] }` — a partial selection rather
+   than a full sort, since only the top `MAX_RESULTS` are ever needed. Name is a tiebreaker for
+   deterministic ordering on exact distance ties.
 7. `Api::V1::CoffeeShopsController#index` (`app/controllers/api/v1/coffee_shops_controller.rb`) —
    validates params via `CoordinateValidator`, calls the finder, renders via
    `CoffeeShopDistanceSerializer`. `rescue_from` maps `CsvClient::RemoteDataSourceError` and

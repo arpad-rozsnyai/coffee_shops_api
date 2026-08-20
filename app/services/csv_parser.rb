@@ -33,10 +33,7 @@ class CsvParser
   end
 
   def build_shops(rows)
-    rows.each_with_object([]) do |row, shops|
-      shop = build_shop(row)
-      shops << shop if shop
-    end
+    rows.filter_map { |row| build_shop(row) }
   end
 
   def build_shop(row)
