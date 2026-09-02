@@ -62,12 +62,31 @@ ActiveRecord test data.
 system of record.** `active_record/railtie` is required in `config/application.rb`, the `pg` gem is in
 the `Gemfile`, and `config/database.yml` configures the `coffee_shops_api_{development,test,production}`
 databases. `CoffeeShop` (`app/models/coffee_shop.rb`) is an `ApplicationRecord` backed by the
-`coffee_shops` table (`db/migrate/20260902112014_create_coffee_shops.rb`): `name`, `coordinate_x`,
-`coordinate_y` (all `null: false`), plus nullable `address` and `open_until`, with a unique index on
-`[name, coordinate_x, coordinate_y]`. `name`/`coordinate_x`/`coordinate_y` also carry `presence`
-validations, pairing the DB constraint with a model-level one. `alias_attribute :x, :coordinate_x` and
-`alias_attribute :y, :coordinate_y` give it a short `x`/`y` interface used throughout
-(`#distance_to(x, y)`, `NearestCoffeeShopsFinder`, the GraphQL types).
+`coffee_shops` table (`db/migrate/20260902112014_create_coffee_shops.rb`, plus
+`db/migrate/20260902163534_add_slug_to_coffee_shops.rb`): `name`, `coordinate_x`, `coordinate_y`,
+`slug` (all `null: false`), plus nullable `address` and `open_until`. `name`/`coordinate_x`/
+`coordinate_y` also carry `presence` validations, pairing the DB constraint with a model-level one.
+`alias_attribute :x, :coordinate_x` and `alias_attribute :y, :coordinate_y` give it a short `x`/`y`
+interface used throughout (`#distance_to(x, y)`, `NearestCoffeeShopsFinder`, the GraphQL types).
+
+**`slug` is the uniqueness anchor, not `[name, coordinate_x, coordinate_y]`.** The old composite
+unique index on those three columns is gone — `slug` (unique index, `presence`+`uniqueness`
+validations) replaces it. It's derived, once, from `name`/`coordinate_x`/`coordinate_y` in a
+`before_validation on: :create` callback (`CoffeeShop#generate_slug`), always overwriting any
+explicitly-assigned value — it's not accepted input, it's computed. `attr_readonly :slug` then makes
+it immutable after creation (`update`/`save` raise `ActiveRecord::ReadonlyAttributeError` if you try to
+change it — Rails 7.1+ behavior; only a bypass like `update_column` can force it, deliberately, the
+same as any `attr_readonly` column). Plain `#parameterize` on the joined string would collide a
+coordinate with its sign-flipped counterpart (`-` is stripped as a non-alphanumeric character, same as
+the join separator) — `#signed_component` guards against that by encoding negative values with a
+literal `neg` prefix before parameterizing (e.g. `x: -122.316` → `neg122.316` → `neg122-316`, distinct
+from the positive `122-316`). Not searchable, not exposed via GraphQL (`Types::CoffeeShopType` has no
+`slug` field) — purely an internal identity/uniqueness concern for now.
+
+The migration's backfill deliberately does not call into the live `CoffeeShop` model — it re-implements
+the same slug algorithm on a migration-local `MigrationCoffeeShop < ActiveRecord::Base` scoped to the
+table, per standard Rails practice: a migration's data transformation should be a frozen snapshot, not
+tied to a model class that's free to change its logic later.
 
 ActiveJob and ActionCable (and the other Rails 8 defaults that ride along with them —
 `solid_cache`/`solid_queue`/`solid_cable`, `config/cable.yml`) remain removed — nothing in this app
@@ -82,8 +101,16 @@ populates the table; the request-time pipeline is GraphQL-only and only ever rea
    the CSV URL. Defaults to the original challenge dataset, overridable via `COFFEE_SHOPS_CSV_URL` env
    var. Nothing else should hardcode this URL.
 2. `CsvClient#fetch` (`app/services/csv_client.rb`) — GETs the URL via stdlib `Net::HTTP` and returns
-   the raw body. Converts timeouts, connection failures, invalid URIs, and non-2xx responses into
-   `CsvClient::RemoteDataSourceError`. Does no parsing, no caching.
+   the body. Converts timeouts, connection failures, invalid URIs, and non-2xx responses into
+   `CsvClient::RemoteDataSourceError`. Does no parsing, no caching. **It does normalize encoding**,
+   though — `Net::HTTP` always tags `response.body` as `ASCII-8BIT` regardless of what the server's
+   `Content-Type` charset says (confirmed against the real feed, which declares `charset=utf-8` yet
+   still comes back `ASCII-8BIT`-tagged); left alone, that byte-soup tag survives into
+   `CoffeeShop#generate_slug`'s `#parameterize` call downstream and blows up with `ArgumentError:
+   Cannot transliterate strings with ASCII-8BIT encoding`. `#normalize_encoding` reads the declared
+   charset from `response.type_params["charset"]` (falling back to UTF-8 if absent), force-encodes to
+   that, validates it, and transcodes to UTF-8 — raising `RemoteDataSourceError` instead if the body
+   isn't valid text in its declared charset, or if the declared charset name is bogus.
 3. `CsvParser.parse(csv_string)` (`app/services/csv_parser.rb`) — parses with stdlib `CSV`. **The
    remote source has no header row** — columns are positional: `Name, X, Y` (confirmed against the
    real feed; do not reintroduce a header-row assumption, e.g. `CSV.parse(..., headers: true)` or a

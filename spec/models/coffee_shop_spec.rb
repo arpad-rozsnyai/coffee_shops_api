@@ -78,12 +78,12 @@ RSpec.describe CoffeeShop do
       expect(shop).to be_valid
     end
 
-    it "is invalid with the same name and coordinates as an existing shop" do
+    it "is invalid with the same name and coordinates as an existing shop (same derived slug)" do
       create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
       shop = build(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
 
       expect(shop).not_to be_valid
-      expect(shop.errors[:name]).to be_present
+      expect(shop.errors[:slug]).to be_present
     end
 
     it "is valid with the same name at different coordinates" do
@@ -98,6 +98,78 @@ RSpec.describe CoffeeShop do
       shop = build(:coffee_shop, name: "Peets", coordinate_x: 1.0, coordinate_y: 2.0)
 
       expect(shop).to be_valid
+    end
+  end
+
+  describe "slug" do
+    it "is generated from the name and coordinates on creation" do
+      shop = create(:coffee_shop, name: "Starbucks Seattle", coordinate_x: 47.5809, coordinate_y: -122.316)
+
+      expect(shop.slug).to eq("starbucks-seattle-47-5809-neg122-316")
+    end
+
+    it "ignores any slug explicitly assigned before creation and derives its own" do
+      shop = create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0, slug: "whatever-i-want")
+
+      expect(shop.slug).not_to eq("whatever-i-want")
+      expect(shop.slug).to eq("starbucks-1-0-2-0")
+    end
+
+    it "is not blank even when the name is made entirely of characters parameterize strips" do
+      shop = create(:coffee_shop, name: "!!!", coordinate_x: 1.0, coordinate_y: 2.0)
+
+      expect(shop.slug).to be_present
+      expect(shop.slug).to eq("1-0-2-0")
+    end
+
+    it "transliterates unicode names rather than dropping them" do
+      shop = create(:coffee_shop, name: "Café Central", coordinate_x: 1.0, coordinate_y: 2.0)
+
+      expect(shop.slug).to eq("cafe-central-1-0-2-0")
+    end
+
+    it "does not raise and stays blank-safe when coordinates are nil (invalid, but must not error)" do
+      shop = build(:coffee_shop, name: "Starbucks", coordinate_x: nil, coordinate_y: nil)
+
+      expect { shop.valid? }.not_to raise_error
+      expect(shop).not_to be_valid
+    end
+
+    it "distinguishes coordinates from their sign-flipped counterparts" do
+      positive = create(:coffee_shop, name: "Twin", coordinate_x: 1.0, coordinate_y: 1.0)
+      negative_x = create(:coffee_shop, name: "Twin", coordinate_x: -1.0, coordinate_y: 1.0)
+      negative_y = create(:coffee_shop, name: "Twin", coordinate_x: 1.0, coordinate_y: -1.0)
+      negative_both = create(:coffee_shop, name: "Twin", coordinate_x: -1.0, coordinate_y: -1.0)
+
+      slugs = [ positive, negative_x, negative_y, negative_both ].map(&:slug)
+
+      expect(slugs.uniq).to eq(slugs)
+    end
+
+    it "raises a database-level not-null violation if a row is inserted without going through the model" do
+      expect {
+        ActiveRecord::Base.connection.execute(
+          "INSERT INTO coffee_shops (name, coordinate_x, coordinate_y, created_at, updated_at) " \
+          "VALUES ('Bypassed', 1.0, 2.0, NOW(), NOW())"
+        )
+      }.to raise_error(ActiveRecord::NotNullViolation)
+    end
+
+    it "cannot be changed after creation, even via an explicit update" do
+      shop = create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
+      original_slug = shop.slug
+
+      expect { shop.update(slug: "hand-rolled-slug") }.to raise_error(ActiveRecord::ReadonlyAttributeError)
+      expect(shop.reload.slug).to eq(original_slug)
+    end
+
+    it "stays the same across unrelated updates" do
+      shop = create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
+      original_slug = shop.slug
+
+      shop.update!(open_until: "10pm")
+
+      expect(shop.reload.slug).to eq(original_slug)
     end
   end
 
