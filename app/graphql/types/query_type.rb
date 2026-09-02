@@ -1,10 +1,12 @@
 module Types
   class QueryType < Types::BaseObject
     DEFAULT_COFFEE_SHOPS_LIMIT = 5
+    HIGHLIGHTED_RESULTS_COUNT = 3
 
     field :coffee_shops, [ Types::CoffeeShopType ], null: false do
       description "Persisted coffee shops, optionally filtered by name and capped by limit " \
-        "(default #{DEFAULT_COFFEE_SHOPS_LIMIT})"
+        "(default #{DEFAULT_COFFEE_SHOPS_LIMIT}). The first #{HIGHLIGHTED_RESULTS_COUNT} results " \
+        "are flagged as highlighted"
       argument :name, String, required: false,
         description: "Case-insensitive partial match against the coffee shop name"
       argument :limit, Integer, required: false,
@@ -25,7 +27,9 @@ module Types
 
     def coffee_shops(name: nil, limit: nil)
       scope = name.present? ? CoffeeShop.name_contains(name) : CoffeeShop
-      scope.limit(coffee_shops_limit(limit))
+      scope.limit(coffee_shops_limit(limit)).order(:id).each_with_index.map do |coffee_shop, index|
+        HighlightedCoffeeShop.new(coffee_shop, highlighted: index < HIGHLIGHTED_RESULTS_COUNT)
+      end
     end
 
     def coffee_shop(id:)
