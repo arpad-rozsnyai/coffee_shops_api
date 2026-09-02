@@ -1,7 +1,6 @@
 class AddSlugToCoffeeShops < ActiveRecord::Migration[8.1]
-  # A migration-local snapshot of the slug algorithm, deliberately not calling into CoffeeShop
-  # (app/models/coffee_shop.rb) — that class is free to change its slug logic later without rewriting
-  # this historical backfill.
+  disable_ddl_transaction!
+
   class MigrationCoffeeShop < ActiveRecord::Base
     self.table_name = "coffee_shops"
   end
@@ -10,9 +9,7 @@ class AddSlugToCoffeeShops < ActiveRecord::Migration[8.1]
     add_column :coffee_shops, :slug, :string
 
     MigrationCoffeeShop.reset_column_information
-    MigrationCoffeeShop.find_each do |shop|
-      shop.update_column(:slug, generate_slug(shop.name, shop.coordinate_x, shop.coordinate_y))
-    end
+    backfill_slugs
 
     change_column_null :coffee_shops, :slug, false
     remove_index :coffee_shops, name: "index_coffee_shops_on_name_and_coordinates"
@@ -27,6 +24,17 @@ class AddSlugToCoffeeShops < ActiveRecord::Migration[8.1]
   end
 
   private
+
+  def backfill_slugs
+    MigrationCoffeeShop.in_batches(of: 1000) do |batch|
+      rows = batch.pluck(:id, :name, :coordinate_x, :coordinate_y, :created_at, :updated_at).map do |id, name, coordinate_x, coordinate_y, created_at, updated_at|
+        { id: id, name: name, coordinate_x: coordinate_x, coordinate_y: coordinate_y,
+          created_at: created_at, updated_at: updated_at, slug: generate_slug(name, coordinate_x, coordinate_y) }
+      end
+
+      MigrationCoffeeShop.upsert_all(rows, update_only: [ :slug ], record_timestamps: false) if rows.any?
+    end
+  end
 
   def generate_slug(name, coordinate_x, coordinate_y)
     [ name, signed_component(coordinate_x), signed_component(coordinate_y) ].join("-").parameterize
