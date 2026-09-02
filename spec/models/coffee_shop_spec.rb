@@ -30,4 +30,69 @@ RSpec.describe CoffeeShop do
       expect(shop.y).to eq(-122.4)
     end
   end
+
+  describe "x/y aliasing" do
+    it "reads and writes coordinate_x/coordinate_y through the x/y aliases" do
+      shop = described_class.new(coordinate_x: 10.0, coordinate_y: 20.0)
+
+      expect(shop.x).to eq(10.0)
+      expect(shop.y).to eq(20.0)
+
+      shop.x = 1.0
+      shop.y = 2.0
+
+      expect(shop.coordinate_x).to eq(1.0)
+      expect(shop.coordinate_y).to eq(2.0)
+    end
+  end
+
+  describe "validations" do
+    it "is valid with a name and coordinates" do
+      expect(build(:coffee_shop)).to be_valid
+    end
+
+    it "is invalid without a name" do
+      shop = build(:coffee_shop, name: nil)
+
+      expect(shop).not_to be_valid
+      expect(shop.errors[:name]).to be_present
+    end
+
+    it "is invalid without coordinate_x" do
+      shop = build(:coffee_shop, coordinate_x: nil)
+
+      expect(shop).not_to be_valid
+      expect(shop.errors[:coordinate_x]).to be_present
+    end
+
+    it "is invalid without coordinate_y" do
+      shop = build(:coffee_shop, coordinate_y: nil)
+
+      expect(shop).not_to be_valid
+      expect(shop.errors[:coordinate_y]).to be_present
+    end
+
+    it "is valid without address or open_until" do
+      shop = build(:coffee_shop, address: nil, open_until: nil)
+
+      expect(shop).to be_valid
+    end
+  end
+
+  describe "persistence" do
+    it "saves and reloads all attributes, including the optional ones" do
+      shop = create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0,
+                                   address: "123 Main St", open_until: "9pm")
+
+      persisted = described_class.find(shop.id)
+
+      expect(persisted).to have_attributes(
+        name: "Starbucks",
+        coordinate_x: 1.0,
+        coordinate_y: 2.0,
+        address: "123 Main St",
+        open_until: "9pm"
+      )
+    end
+  end
 end
