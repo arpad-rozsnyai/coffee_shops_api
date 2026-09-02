@@ -1,0 +1,224 @@
+require "rails_helper"
+
+RSpec.describe "POST /graphql", type: :request do
+  def post_graphql(query, variables: {})
+    post "/graphql", params: { query: query, variables: variables.to_json }
+  end
+
+  describe "coffeeShops" do
+    it "returns all persisted coffee shops" do
+      create(:coffee_shop, name: "Near", coordinate_x: 1, coordinate_y: 0)
+      create(:coffee_shop, name: "Far", coordinate_x: 10, coordinate_y: 0)
+
+      post_graphql(<<~GRAPHQL)
+        query {
+          coffeeShops {
+            name
+            x
+            y
+          }
+        }
+      GRAPHQL
+
+      expect(response).to have_http_status(:ok)
+      shops = response.parsed_body.dig("data", "coffeeShops")
+      expect(shops.map { |s| s["name"] }).to contain_exactly("Near", "Far")
+    end
+
+    it "returns an empty array when no coffee shops are persisted" do
+      post_graphql(<<~GRAPHQL)
+        query {
+          coffeeShops {
+            name
+          }
+        }
+      GRAPHQL
+
+      expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
+    end
+
+    it "caps the number of returned shops to guard against an unbounded response" do
+      expect(CoffeeShop).to receive(:limit).with(Types::QueryType::MAX_COFFEE_SHOPS).and_call_original
+
+      post_graphql(<<~GRAPHQL)
+        query {
+          coffeeShops {
+            name
+          }
+        }
+      GRAPHQL
+
+      expect(response).to have_http_status(:ok)
+    end
+
+    it "works with a query sent with no variables key at all" do
+      post "/graphql", params: { query: "query { coffeeShops { name } }" }
+
+      expect(response).to have_http_status(:ok)
+      expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
+    end
+
+    it "works with variables sent as a nested JSON object rather than a JSON-encoded string" do
+      shop = create(:coffee_shop, name: "Only")
+
+      post "/graphql",
+        params: { query: "query($id: ID!) { coffeeShop(id: $id) { name } }", variables: { id: shop.id } }.to_json,
+        headers: { "CONTENT_TYPE" => "application/json" }
+
+      expect(response).to have_http_status(:ok)
+      expect(response.parsed_body.dig("data", "coffeeShop", "name")).to eq("Only")
+    end
+  end
+
+  describe "coffeeShop(id:)" do
+    it "returns a single coffee shop by id" do
+      shop = create(:coffee_shop, name: "Only")
+
+      post_graphql(<<~GRAPHQL, variables: { id: shop.id })
+        query($id: ID!) {
+          coffeeShop(id: $id) {
+            name
+          }
+        }
+      GRAPHQL
+
+      expect(response.parsed_body.dig("data", "coffeeShop", "name")).to eq("Only")
+    end
+
+    it "returns null for an id that does not exist" do
+      post_graphql(<<~GRAPHQL, variables: { id: "0" })
+        query($id: ID!) {
+          coffeeShop(id: $id) {
+            name
+          }
+        }
+      GRAPHQL
+
+      expect(response.parsed_body.dig("data", "coffeeShop")).to be_nil
+    end
+  end
+
+  describe "nearestCoffeeShops" do
+    it "returns the three nearest persisted shops ordered nearest to farthest, with distance" do
+      create(:coffee_shop, name: "Far", coordinate_x: 10, coordinate_y: 0)
+      create(:coffee_shop, name: "Near", coordinate_x: 1, coordinate_y: 0)
+      create(:coffee_shop, name: "Farthest", coordinate_x: 20, coordinate_y: 0)
+      create(:coffee_shop, name: "Mid", coordinate_x: 3, coordinate_y: 0)
+
+      post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0 })
+        query($x: Float!, $y: Float!) {
+          nearestCoffeeShops(x: $x, y: $y) {
+            distance
+            coffeeShop {
+              name
+            }
+          }
+        }
+      GRAPHQL
+
+      results = response.parsed_body.dig("data", "nearestCoffeeShops")
+      expect(results.map { |r| r["coffeeShop"]["name"] }).to eq(%w[Near Mid Far])
+      expect(results.first["distance"]).to eq(1.0)
+    end
+
+    it "returns a variable coercion error when x or y is missing" do
+      post_graphql(<<~GRAPHQL, variables: { x: 0 })
+        query($x: Float!, $y: Float!) {
+          nearestCoffeeShops(x: $x, y: $y) {
+            distance
+          }
+        }
+      GRAPHQL
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "returns a variable coercion error when x is not a number" do
+      post_graphql(<<~GRAPHQL, variables: { x: "not-a-number", y: 0 })
+        query($x: Float!, $y: Float!) {
+          nearestCoffeeShops(x: $x, y: $y) {
+            distance
+          }
+        }
+      GRAPHQL
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "rounds distance to four decimal places" do
+      create(:coffee_shop, name: "Diagonal", coordinate_x: 1, coordinate_y: 1)
+
+      post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0 })
+        query($x: Float!, $y: Float!) {
+          nearestCoffeeShops(x: $x, y: $y) {
+            distance
+          }
+        }
+      GRAPHQL
+
+      results = response.parsed_body.dig("data", "nearestCoffeeShops")
+      expect(results.first["distance"]).to eq(1.4142)
+    end
+
+    it "returns fewer than three results when fewer shops exist" do
+      create(:coffee_shop, name: "Only", coordinate_x: 1, coordinate_y: 0)
+
+      post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0 })
+        query($x: Float!, $y: Float!) {
+          nearestCoffeeShops(x: $x, y: $y) {
+            coffeeShop { name }
+          }
+        }
+      GRAPHQL
+
+      results = response.parsed_body.dig("data", "nearestCoffeeShops")
+      expect(results.size).to eq(1)
+    end
+
+    it "returns an empty array of nearest shops when no coffee shops are persisted" do
+      post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0 })
+        query($x: Float!, $y: Float!) {
+          nearestCoffeeShops(x: $x, y: $y) {
+            coffeeShop { name }
+          }
+        }
+      GRAPHQL
+
+      expect(response.parsed_body.dig("data", "nearestCoffeeShops")).to eq([])
+    end
+
+    it "breaks exact distance ties deterministically by shop name" do
+      create(:coffee_shop, name: "B Shop", coordinate_x: 1, coordinate_y: 0)
+      create(:coffee_shop, name: "A Shop", coordinate_x: 0, coordinate_y: 1)
+
+      post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0 })
+        query($x: Float!, $y: Float!) {
+          nearestCoffeeShops(x: $x, y: $y) {
+            coffeeShop { name }
+          }
+        }
+      GRAPHQL
+
+      results = response.parsed_body.dig("data", "nearestCoffeeShops")
+      expect(results.map { |r| r["coffeeShop"]["name"] }).to eq([ "A Shop", "B Shop" ])
+    end
+  end
+
+  describe "malformed requests" do
+    it "returns a query error instead of a 500 when the query param is missing" do
+      post "/graphql", params: {}
+
+      expect(response).to have_http_status(:ok)
+      expect(response.parsed_body["errors"]).to be_present
+    end
+
+    it "returns a query error instead of a 500 when the query is syntactically invalid" do
+      post "/graphql", params: { query: "{ this is not valid graphql" }
+
+      expect(response).to have_http_status(:ok)
+      expect(response.parsed_body["errors"]).to be_present
+    end
+  end
+end
