@@ -28,7 +28,7 @@ module Types
     def coffee_shops(name: nil, limit: nil)
       scope = name.present? ? CoffeeShop.name_contains(name) : CoffeeShop
       scope.limit(coffee_shops_limit(limit)).order(:id).each_with_index.map do |coffee_shop, index|
-        HighlightedCoffeeShop.new(coffee_shop, highlighted: index < HIGHLIGHTED_RESULTS_COUNT)
+        coffee_shop.tap { |shop| shop.highlighted = index < HIGHLIGHTED_RESULTS_COUNT }
       end
     end
 

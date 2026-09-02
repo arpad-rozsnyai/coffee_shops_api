@@ -10,9 +10,5 @@ module Types
     field :open_until, String, null: true
     field :highlighted, Boolean, null: false,
       description: "True for the top results of a coffeeShops search; false otherwise"
-
-    def highlighted
-      object.respond_to?(:highlighted) ? object.highlighted : false
-    end
   end
 end
