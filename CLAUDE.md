@@ -47,15 +47,31 @@ when adding coverage for CI, add/extend RSpec specs under `spec/` and treat the 
 WebMock is loaded in `spec/rails_helper.rb` and disables all real outbound HTTP in specs — any code
 that hits the network needs a `stub_request` (see `spec/services/csv_client_spec.rb`).
 
+`factory_bot_rails` is available for ActiveRecord model specs (`config.include
+FactoryBot::Syntax::Methods` in `spec/rails_helper.rb`, so specs call `build`/`create` directly, no
+`FactoryBot.` prefix). Factories live in `spec/factories/`, one file per model (see
+`spec/factories/coffee_shops.rb`). This is separate from the `spec/fixtures/files/coffee_shops/*.csv`
+fixtures, which are raw CSV text used to stub the remote feed for `CsvClient`/`CsvParser` specs, not
+ActiveRecord test data.
+
 ## Architecture
 
-**ActiveRecord + PostgreSQL are wired up, but nothing persists yet.** `active_record/railtie` is
-required in `config/application.rb`, the `pg` gem is in the `Gemfile`, and `config/database.yml`
-configures the `coffee_shops_api_{development,test,production}` databases (`bin/rails db:create` has
-been run for dev/test). This is infrastructure only — there is deliberately no `db/` directory, no
-migrations, and no ActiveRecord models yet; that's the next feature. Until then, the request-time
-pipeline below is unchanged: coffee shops are still fetched from a remote CSV on each request and
-modeled as a plain Ruby object, not a database row.
+**ActiveRecord + PostgreSQL are wired up; `CoffeeShop` is now a persisted model, but nothing is
+populated yet.** `active_record/railtie` is required in `config/application.rb`, the `pg` gem is in
+the `Gemfile`, and `config/database.yml` configures the `coffee_shops_api_{development,test,production}`
+databases. `CoffeeShop` (`app/models/coffee_shop.rb`) is an `ApplicationRecord` backed by the
+`coffee_shops` table (`db/migrate/20260902112014_create_coffee_shops.rb`): `name`, `coordinate_x`,
+`coordinate_y` (all `null: false`), plus nullable `address` and `open_until`. `name`/`coordinate_x`/
+`coordinate_y` also carry `presence` validations, pairing the DB constraint with a model-level one.
+
+`CoffeeShop` used to be a plain Ruby value object built by `CsvParser` from the remote feed; it's now
+the same class reused as the persisted model (a deliberate choice — the CSV-sourced version is being
+replaced by the DB-persisted one, not run alongside it as a separate class). To do that without
+rewriting the whole request-time pipeline in the same change, `alias_attribute :x, :coordinate_x` and
+`alias_attribute :y, :coordinate_y` keep the `x`/`y` interface `CsvParser`, `NearestCoffeeShopsFinder`,
+and `#distance_to` already depended on working unchanged against the real columns. `CsvParser` still
+builds unsaved `CoffeeShop.new(name:, x:, y:)` instances from the live feed each request — nothing is
+saved to the database yet, and no repository/finder code reads from the table. That's the next step.
 
 ActiveJob and ActionCable (and the other Rails 8 defaults that ride along with them —
 `solid_cache`/`solid_queue`/`solid_cable`, `config/cable.yml`) remain removed — nothing in this app
@@ -80,11 +96,10 @@ testable):
    `CsvParser::ParseError` (nested under `CsvParser`, not a top-level class — see Error convention
    below). A well-formed but empty feed returns an empty array — that's not an error, since
    there's no header line to make "zero shops" ambiguous with "broken feed".
-4. `CoffeeShop` (`app/models/coffee_shop.rb`) — plain Ruby value object (`name`, `x`, `y`,
-   `#distance_to(x, y)` via `Math.hypot`), not an ActiveRecord model. It lives in `app/models` purely
-   by Zeitwerk convention.
-   Returns full-precision distance; rounding to 4 decimals (per the contract) is a presentation-layer
-   concern, not implemented here.
+4. `CoffeeShop` (`app/models/coffee_shop.rb`) — an `ApplicationRecord` (see Architecture note above
+   for the table/aliasing details), used here as an unsaved value object: `#distance_to(x, y)` via
+   `Math.hypot`. Returns full-precision distance; rounding to 4 decimals (per the contract) is a
+   presentation-layer concern, not implemented here.
 5. `CoffeeShopRepository#all` (`app/services/coffee_shop_repository.rb`) — composes steps 2 and 3
    (`parser.parse(client.fetch)`); the only place that wires `CsvClient` and `CsvParser` together.
 6. `NearestCoffeeShopsFinder#call(x:, y:)` (`app/services/nearest_coffee_shops_finder.rb`) — asks the
