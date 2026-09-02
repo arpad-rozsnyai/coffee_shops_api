@@ -45,6 +45,19 @@ class CsvClient
       raise RemoteDataSourceError, "Unexpected response fetching coffee shop CSV: HTTP #{response.code}"
     end
 
-    response.body
+    normalize_encoding(response.body, response.type_params["charset"])
+  end
+
+  # Net::HTTP never tags the body with the charset the server declares in Content-Type — it always
+  # comes back as ASCII-8BIT (confirmed against the real feed, which returns "charset=utf-8" in its
+  # header yet an ASCII-8BIT-tagged body).
+  def normalize_encoding(body, charset)
+    encoding = Encoding.find(charset || Encoding::UTF_8.name)
+    text = body.dup.force_encoding(encoding)
+    raise RemoteDataSourceError, "Coffee shop CSV response was not valid #{encoding} text" unless text.valid_encoding?
+
+    text.encode(Encoding::UTF_8)
+  rescue ArgumentError
+    raise RemoteDataSourceError, "Coffee shop CSV response declared an unknown charset: #{charset.inspect}"
   end
 end
