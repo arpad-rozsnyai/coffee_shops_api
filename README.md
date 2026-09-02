@@ -178,8 +178,10 @@ unparseable. The underlying exception is never leaked to the client:
 
 ## Architecture
 
-There is no database model for coffee shop data — each request runs a small pipeline that fetches
-and parses the CSV fresh, then selects and renders the result:
+ActiveRecord + PostgreSQL are wired up as infrastructure (see [Why no coffee shop database
+model yet](#why-no-coffee-shop-database-model-yet) below), but nothing persists yet — each request
+still runs a small pipeline that fetches and parses the CSV fresh, then selects and renders the
+result:
 
 1. **`CoffeeShops.csv_url`** (`config/initializers/coffee_shops.rb`) — single source of truth for the
    CSV URL (default + `COFFEE_SHOPS_CSV_URL` override). Nothing else hardcodes it.
@@ -190,7 +192,7 @@ and parses the CSV fresh, then selects and renders the result:
    (positional columns: `Name, X, Y`, no header row). Skips individually bad rows; raises
    `CsvParser::ParseError` only if the CSV itself is structurally broken.
 4. **`CoffeeShop`** (`app/models/coffee_shop.rb`) — plain Ruby value object (`name`, `x`, `y`,
-   `#distance_to(x, y)` via `Math.hypot`). This app has no database at all — no ActiveRecord.
+   `#distance_to(x, y)` via `Math.hypot`), not an ActiveRecord model.
 5. **`CoffeeShopRepository#all`** (`app/services/coffee_shop_repository.rb`) — wires the client and
    parser together: `parser.parse(client.fetch)`.
 6. **`NearestCoffeeShopsFinder#call(x:, y:)`** (`app/services/nearest_coffee_shops_finder.rb`) —
@@ -228,14 +230,16 @@ challenge defines — not geographic lat/long. Full floating-point precision is 
 pairing and sorting; rounding to four decimal places happens exactly once, at serialization — it's a
 presentation concern, not a computation one, so sort order is never affected by rounding.
 
-## Why no database
+## Why no coffee shop database model yet
 
 The CSV is the authoritative, externally-owned source of truth, fetched fresh on every request —
 there's nothing for this app to persist an independent copy of, and no requirement to serve data the
-source no longer has. Rails 8 defaults to SQLite-backed ActiveRecord, Solid Queue/Cache/Cable, and
-Active Storage's `image_processing`/Thruster out of the box, but none of them are used by this app,
-so they (and `db/`, `config/database.yml`, `config/cable.yml`) have been removed rather than carried
-as dead weight.
+source no longer has. `ActiveRecord`/`pg` are wired up (`config/application.rb`,
+`config/database.yml`) as infrastructure for a future feature, but there is deliberately no `db/`
+directory, no migrations, and no `CoffeeShop` ActiveRecord model yet. Rails 8 also defaults to Solid
+Queue/Cache/Cable and Active Storage's `image_processing`/Thruster out of the box; none of those are
+used by this app, so they (and `config/cable.yml`) have been removed rather than carried as dead
+weight.
 
 ## Why no geospatial gem
 

@@ -1,0 +1,20 @@
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+
+development:
+  <<: *default
+  database: coffee_shops_api_development
+
+test:
+  <<: *default
+  database: coffee_shops_api_test
+
+production:
+  primary:
+    <<: *default
+    database: coffee_shops_api_production
+    username: coffee_shops_api
+    password: <%= ENV["COFFEE_SHOPS_API_DATABASE_PASSWORD"] %>
+    host: <%= ENV["DB_HOST"] %>
