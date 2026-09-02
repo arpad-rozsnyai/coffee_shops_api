@@ -102,8 +102,12 @@
         distance to your nearest one. Welcome to the secret staff corner.
       </p>
 
-      <%= link_to rswag_ui_path, class: "cta", target: "_blank", rel: "noopener noreferrer" do %>
-        Peek behind the counter (API docs) →
+      <% if Rails.env.development? %>
+        <%= link_to "Explore the API (GraphiQL) →", "/graphiql", class: "cta", target: "_blank", rel: "noopener noreferrer" %>
+      <% else %>
+        <p class="tagline">
+          API: <code>POST /graphql</code>
+        </p>
       <% end %>
     </main>
   </body>

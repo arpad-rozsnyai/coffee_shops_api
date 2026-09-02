@@ -1,7 +1,7 @@
 class NearestCoffeeShopsFinder
   MAX_RESULTS = 3
 
-  def initialize(repository: CoffeeShopRepository.new)
+  def initialize(repository:)
     @repository = repository
   end
 

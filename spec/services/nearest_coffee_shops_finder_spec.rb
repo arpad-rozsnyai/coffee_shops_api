@@ -1,7 +1,7 @@
 require "rails_helper"
 
 RSpec.describe NearestCoffeeShopsFinder do
-  let(:repository) { instance_double(CoffeeShopRepository) }
+  let(:repository) { double("repository") }
   let(:finder) { described_class.new(repository: repository) }
 
   def shop(name:, x:, y:)

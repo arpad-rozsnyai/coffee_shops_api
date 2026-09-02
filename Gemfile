@@ -44,14 +44,17 @@ group :development, :test do
 
   gem "rspec-rails"
 
-  gem "rswag-specs"
-
   gem "factory_bot_rails"
 end
 
-gem "rswag-api"
-gem "rswag-ui"
-
 group :test do
   gem "webmock"
+end
+
+gem "graphql", "~> 2.6"
+
+group :development do
+  # Order matters here — see CLAUDE.md's GraphiQL section.
+  gem "sprockets-rails"
+  gem "graphiql-rails"
 end

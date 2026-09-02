@@ -4,10 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Rails 8.1 API-only app implementing a coding-challenge contract: accept a user's `X`/`Y` coordinates
-and return the three nearest coffee shops from a remote CSV data source, ordered nearest-to-farthest,
-as a JSON:API response. See `README.md` for the full contract, including the reference ordering case
-used to validate correctness.
+Rails 8.1 API-only app. Given a user's `X`/`Y` coordinates, finds the nearest coffee shops in the
+`coffee_shops` table. **This started as a take-home coding challenge (AgileFreaks); that phase is
+over.** The original README-documented REST/JSON:API contract has been deliberately replaced, not
+extended — the app now takes ongoing feature requests like any normal product codebase, and **the
+only live API is GraphQL** (`POST /graphql`). Do not treat the old challenge contract as something to
+preserve or restore.
 
 **Ruby:** developed against Ruby 4.0.5 via rvm. The committed `.ruby-version` / `Gemfile` still pin
 3.2.1 — if you hit version-related install or CI issues, check which Ruby is actually active
@@ -25,7 +27,7 @@ fix → re-review until two consecutive green rounds, then runs `bin/rubocop` to
 ## Commands
 
 ```bash
-bin/setup                                          # install deps, prepare db, start server
+bin/setup                                          # install deps, start server (does NOT prepare the db — run bin/rails db:prepare first)
 bin/dev                                             # start the Rails server (bin/rails server)
 
 bundle exec rspec                                   # run the full test suite
@@ -56,74 +58,131 @@ ActiveRecord test data.
 
 ## Architecture
 
-**ActiveRecord + PostgreSQL are wired up; `CoffeeShop` is now a persisted model, but nothing is
-populated yet.** `active_record/railtie` is required in `config/application.rb`, the `pg` gem is in
+**ActiveRecord + PostgreSQL are wired up and populated; `CoffeeShop` is a persisted model and the
+system of record.** `active_record/railtie` is required in `config/application.rb`, the `pg` gem is in
 the `Gemfile`, and `config/database.yml` configures the `coffee_shops_api_{development,test,production}`
 databases. `CoffeeShop` (`app/models/coffee_shop.rb`) is an `ApplicationRecord` backed by the
 `coffee_shops` table (`db/migrate/20260902112014_create_coffee_shops.rb`): `name`, `coordinate_x`,
-`coordinate_y` (all `null: false`), plus nullable `address` and `open_until`. `name`/`coordinate_x`/
-`coordinate_y` also carry `presence` validations, pairing the DB constraint with a model-level one.
-
-`CoffeeShop` used to be a plain Ruby value object built by `CsvParser` from the remote feed; it's now
-the same class reused as the persisted model (a deliberate choice — the CSV-sourced version is being
-replaced by the DB-persisted one, not run alongside it as a separate class). To do that without
-rewriting the whole request-time pipeline in the same change, `alias_attribute :x, :coordinate_x` and
-`alias_attribute :y, :coordinate_y` keep the `x`/`y` interface `CsvParser`, `NearestCoffeeShopsFinder`,
-and `#distance_to` already depended on working unchanged against the real columns. `CsvParser` still
-builds unsaved `CoffeeShop.new(name:, x:, y:)` instances from the live feed each request — nothing is
-saved to the database yet, and no repository/finder code reads from the table. That's the next step.
+`coordinate_y` (all `null: false`), plus nullable `address` and `open_until`, with a unique index on
+`[name, coordinate_x, coordinate_y]`. `name`/`coordinate_x`/`coordinate_y` also carry `presence`
+validations, pairing the DB constraint with a model-level one. `alias_attribute :x, :coordinate_x` and
+`alias_attribute :y, :coordinate_y` give it a short `x`/`y` interface used throughout
+(`#distance_to(x, y)`, `NearestCoffeeShopsFinder`, the GraphQL types).
 
 ActiveJob and ActionCable (and the other Rails 8 defaults that ride along with them —
 `solid_cache`/`solid_queue`/`solid_cable`, `config/cable.yml`) remain removed — nothing in this app
 enqueues jobs or uses websockets.
 
-**Request-time pipeline** (fetch → parse → [selection] → [render], each step decoupled and independently
-testable):
+There are two separate pipelines. Don't conflate them — the import pipeline is offline/manual and
+populates the table; the request-time pipeline is GraphQL-only and only ever reads the table.
+
+**Import pipeline** (populates the DB; run manually via a rake task, never as part of a request):
 
 1. `CoffeeShops.csv_url` (`config/initializers/coffee_shops.rb`) — the single authoritative source for
-   the CSV URL. Defaults to the challenge's dataset, overridable via `COFFEE_SHOPS_CSV_URL` env var.
-   Nothing else should hardcode this URL.
-2. `CsvClient#fetch` (`app/services/csv_client.rb`) — GETs the URL via stdlib
-   `Net::HTTP` and returns the raw body. Converts timeouts, connection failures, invalid URIs, and
-   non-2xx responses into `CsvClient::RemoteDataSourceError`. Does no parsing, no caching.
-3. `CsvParser.parse(csv_string)` (`app/services/csv_parser.rb`) — parses with
-   stdlib `CSV`. **The remote source has no header row** — columns are positional: `Name, X, Y`
-   (confirmed against the actual challenge dataset; do not reintroduce a header-row assumption, e.g.
-   `CSV.parse(..., headers: true)` or a required-headers check — that was tried and breaks against the
-   real feed, which starts directly with data). Uses strict `Float()` (never `to_f`) for coordinates.
-   Row-level problems (blank name, missing/non-numeric coordinates) are silently skipped so one bad row
-   doesn't break the batch; a structurally unparseable CSV (e.g. an unterminated quote) raises
-   `CsvParser::ParseError` (nested under `CsvParser`, not a top-level class — see Error convention
-   below). A well-formed but empty feed returns an empty array — that's not an error, since
-   there's no header line to make "zero shops" ambiguous with "broken feed".
-4. `CoffeeShop` (`app/models/coffee_shop.rb`) — an `ApplicationRecord` (see Architecture note above
-   for the table/aliasing details), used here as an unsaved value object: `#distance_to(x, y)` via
-   `Math.hypot`. Returns full-precision distance; rounding to 4 decimals (per the contract) is a
-   presentation-layer concern, not implemented here.
-5. `CoffeeShopRepository#all` (`app/services/coffee_shop_repository.rb`) — composes steps 2 and 3
-   (`parser.parse(client.fetch)`); the only place that wires `CsvClient` and `CsvParser` together.
-6. `NearestCoffeeShopsFinder#call(x:, y:)` (`app/services/nearest_coffee_shops_finder.rb`) — asks the
-   repository for all shops, pairs each with `{ coffee_shop:, distance: }` via `CoffeeShop#distance_to`,
-   and takes the 3 nearest via `min_by(MAX_RESULTS) { [distance, name] }` — a partial selection rather
-   than a full sort, since only the top `MAX_RESULTS` are ever needed. Name is a tiebreaker for
-   deterministic ordering on exact distance ties.
-7. `Api::V1::CoffeeShopsController#index` (`app/controllers/api/v1/coffee_shops_controller.rb`) —
-   validates params via `CoordinateValidator`, calls the finder, renders via
-   `CoffeeShopDistanceSerializer`. `rescue_from` maps `CsvClient::RemoteDataSourceError` and
-   `CsvParser::ParseError` to a 503; validation failures render a 400 directly (not an exception).
-8. `CoffeeShopDistanceSerializer` (`app/serializers/coffee_shop_distance_serializer.rb`) — renders the
-   JSON:API `data` document; rounds distance to 4 decimals here (the only rounding point) and derives a
-   deterministic `id` via `SHA1(name:x:y)` since CSV rows have no persisted identity.
+   the CSV URL. Defaults to the original challenge dataset, overridable via `COFFEE_SHOPS_CSV_URL` env
+   var. Nothing else should hardcode this URL.
+2. `CsvClient#fetch` (`app/services/csv_client.rb`) — GETs the URL via stdlib `Net::HTTP` and returns
+   the raw body. Converts timeouts, connection failures, invalid URIs, and non-2xx responses into
+   `CsvClient::RemoteDataSourceError`. Does no parsing, no caching.
+3. `CsvParser.parse(csv_string)` (`app/services/csv_parser.rb`) — parses with stdlib `CSV`. **The
+   remote source has no header row** — columns are positional: `Name, X, Y` (confirmed against the
+   real feed; do not reintroduce a header-row assumption, e.g. `CSV.parse(..., headers: true)` or a
+   required-headers check — that was tried and breaks against the real feed, which starts directly
+   with data). Uses strict `Float()` (never `to_f`) for coordinates. Row-level problems (blank name,
+   missing/non-numeric coordinates) are silently skipped so one bad row doesn't break the batch; a
+   structurally unparseable CSV (e.g. an unterminated quote) raises `CsvParser::ParseError` (nested
+   under `CsvParser`, not a top-level class — see Error convention below). A well-formed but empty
+   feed returns an empty array — that's not an error.
+4. `CoffeeShopImporter#call` (`app/services/coffee_shop_importer.rb`) — builds unsaved
+   `CoffeeShop.new(name:, x:, y:)` per parsed row via `parser.parse(client.fetch)`, skips rows that
+   already exist (matched on `name`+`coordinate_x`+`coordinate_y`, enforced by the DB unique index),
+   and `save!`s the rest. Invoked via `bin/rails coffee_shops:import` (`lib/tasks/coffee_shops.rake`).
+   Nothing runs this automatically — the table only reflects the feed as of the last manual import.
+
+**Request-time pipeline** (GraphQL only — there is no REST API):
+
+1. `POST /graphql` → `GraphqlController#execute` (`app/controllers/graphql_controller.rb`) — executes
+   `params[:query]`/`params[:variables]`/`params[:operationName]` against `CoffeeShopsApiSchema` and
+   renders the result as-is. `#prepare_variables` normalizes `variables` whether it arrives as a
+   JSON-encoded string param or a nested JSON object (Rails parses a JSON body into
+   `ActionController::Parameters`) — both are real, distinct code paths GraphQL clients use depending
+   on how they encode the request; both are covered in `spec/requests/graphql_spec.rb`.
+2. `CoffeeShopsApiSchema` (`app/graphql/coffee_shops_api_schema.rb`) → `Types::QueryType`
+   (`app/graphql/types/query_type.rb`) — **query-only, no mutations** (a deliberate, current-scope
+   decision, not an oversight — write support is a separate future ticket). Three fields:
+   - `coffeeShops` — `CoffeeShop.limit(MAX_COFFEE_SHOPS)` (currently `500`). Capped because this is the
+     only "list everything" field in the app; every other field is inherently bounded. If you add
+     pagination later, replace the flat cap rather than layering an argument on top of it.
+   - `coffeeShop(id: ID!)` — `CoffeeShop.find_by(id:)`, returns a nullable single `CoffeeShopType`,
+     **not an array**. This is deliberate GraphQL convention (singular field name → nullable single
+     object; plural field name → non-null list) and was specifically confirmed against an
+     interviewer's feedback — don't "fix" it into an array for consistency with the other fields.
+   - `nearestCoffeeShops(x: Float!, y: Float!)` — `NearestCoffeeShopsFinder.new(repository:
+     CoffeeShop).call(x:, y:)`. Passing the `CoffeeShop` AR class itself as `repository:` works because
+     the finder only ever calls `repository.all`, and `CoffeeShop.all` satisfies that — no separate "DB
+     repository" class exists or is needed for this.
+3. `Types::CoffeeShopType` / `Types::NearestCoffeeShopType` (`app/graphql/types/`) — render the
+   response directly from `CoffeeShop`/`{coffee_shop:, distance:}`; there's no separate serializer
+   class the way REST had one. `NearestCoffeeShopType#distance` is where the once-only 4-decimal
+   rounding happens now (a presentation concern, same reasoning as before, just relocated).
+4. `NearestCoffeeShopsFinder#call(x:, y:)` (`app/services/nearest_coffee_shops_finder.rb`) — pairs each
+   shop with `{ coffee_shop:, distance: }` via `CoffeeShop#distance_to` (`Math.hypot`), and takes the 3
+   nearest via `min_by(MAX_RESULTS) { [distance, name] }` — a partial selection rather than a full
+   sort, since only the top `MAX_RESULTS` are ever needed. Name is a tiebreaker for deterministic
+   ordering on exact distance ties. `repository:` is a **required** keyword arg (no default) — there's
+   only ever one caller now, and it always passes `CoffeeShop` explicitly.
+
+`HomeController` (`app/controllers/home_controller.rb`) only has `index` — a static landing page, no
+data pipeline involved. An HTML `/search` form was added and then removed again the same session
+(2026-09-02); don't reintroduce it without checking whether it's actually wanted this time.
+**`CoordinateValidator` (`app/services/coordinate_validator.rb`) is now unused in the live app** — its
+only caller was that removed `#search` action; it's kept only because removing it wasn't explicitly
+asked for, not because anything still calls it (confirm with a repo-wide grep before assuming
+otherwise). GraphQL's own `Float!` argument coercion is what actually validates `nearestCoffeeShops`'
+`x`/`y` now.
+
+**GraphiQL (development only):** `GET /graphiql` mounts `GraphiQL::Rails::Engine`
+(`config/routes.rb`, guarded by `if Rails.env.development?` — confirmed absent from
+`Rails.application.routes.routes` under `RAILS_ENV=production`), the interactive explorer, as the
+Swagger-UI replacement. It needs Sprockets (`sprockets-rails` + `graphiql-rails`, both
+`group :development` in the `Gemfile` — this app otherwise has no asset pipeline). Two things that
+will bite you if touched carelessly:
+- **Gemfile order matters:** `sprockets-rails` must be listed *before* `graphiql-rails`.
+  `graphiql-rails`'s engine (`lib/graphiql/rails/engine.rb`) only registers its assets for
+  precompilation if `Sprockets` is already `defined?` at load time; `Bundler.require` loads gems in
+  Gemfile declaration order, so getting this backwards makes it silently fall back to serving from an
+  empty `public/` dir in the gem instead — no boot error, just a broken page. Confirmed by actually
+  reordering and re-booting, not by reasoning about it.
+- **`graphiql-rails` 1.10.5 only precompiles its own `.css`, not its `.js`** (a gap in the gem itself,
+  confirmed by reading `lib/graphiql/rails/engine.rb`) — without `config/initializers/graphiql.rb`
+  explicitly adding `graphiql/rails/application.js` to `config.assets.precompile`, `/graphiql` 500s
+  with `Sprockets::Rails::Helper::AssetNotPrecompiledError` on the JS asset specifically (the CSS
+  loads fine, which is what makes this one non-obvious). `app/assets/config/manifest.js` exists only
+  because Sprockets requires the file to be present at all — this app has no assets of its own.
+
+**REST API removed — do not reintroduce without discussion.** `Api::V1::CoffeeShopsController`,
+`CoffeeShopDistanceSerializer`, `CoffeeShopRepository`, and the Rswag/OpenAPI docs setup (the
+`rswag-api`/`rswag-ui`/`rswag-specs` gems, `config/initializers/rswag_*.rb`, the `/api-docs` mount, and
+the checked-in `swagger/` dir) were all deliberately deleted, not deprecated — GraphQL replaced REST
+entirely, with no backward-compatibility shim kept. **`CsvClient` and `CsvParser` were *not* removed**
+— don't assume "REST is gone" means the whole CSV layer is dead; they're still load-bearing for
+`CoffeeShopImporter`/the import rake task, which is how the table GraphQL reads from gets populated.
+Only `CoffeeShopRepository` (a thin `parser.parse(client.fetch)` wrapper that existed solely to feed
+the old request-time CSV pipeline) was genuinely orphaned and removed along with REST.
 
 **Namespacing convention:** `CoffeeShops` (plural module, `config/initializers/coffee_shops.rb`) is
 config-only — just `CoffeeShops.csv_url`. Everything under `app/services/` and `app/models/` is a
 flat, top-level class (`CsvClient`, `CsvParser`, `CoffeeShop`, ...) with no app-specific module
-nesting — matches the directory layout 1:1, per Zeitwerk convention.
+nesting — matches the directory layout 1:1, per Zeitwerk convention. `app/graphql/types/` is the one
+place that *does* nest under a module (`Types::`) — that's standard graphql-ruby convention, still
+matches its directory layout 1:1, and isn't a violation of the services/models rule above (which is
+scoped to those two directories).
 
 **Error convention:** each failure domain gets its own narrow `StandardError` subclass, nested inside
 the one class that raises it rather than given its own top-level file: `CsvClient::RemoteDataSourceError`
 (`app/services/csv_client.rb`) and `CsvParser::ParseError` (`app/services/csv_parser.rb`). Raised only
-from specifically-rescued exceptions — no broad `rescue StandardError`.
+from specifically-rescued exceptions — no broad `rescue StandardError`. Both are still actively used —
+by `CoffeeShopImporter`/the rake task now, not a request-time controller.
 
 This nesting is a deliberate exception to the flat-file convention above, not an oversight — a bare
 top-level `CsvParseError`/`RemoteDataSourceError` each in its own file (as they originally were) was
@@ -139,3 +198,5 @@ class, nest it inside its raising class the same way — don't give it its own t
 - No Geocoder or other distance/geospatial gem — stdlib `Math.hypot` only.
 - No CSV-parsing gem — stdlib `CSV` only.
 - No dotenv — env vars are read directly via `ENV.fetch`.
+- No REST API — GraphQL (`POST /graphql`) is the only live query interface; see above.
+- No GraphQL mutations yet — queries only; CRUD/write support is a separate, future ticket.
