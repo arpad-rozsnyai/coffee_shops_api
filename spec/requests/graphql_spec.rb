@@ -37,8 +37,8 @@ RSpec.describe "POST /graphql", type: :request do
       expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
     end
 
-    it "caps the number of returned shops to guard against an unbounded response" do
-      expect(CoffeeShop).to receive(:limit).with(Types::QueryType::MAX_COFFEE_SHOPS).and_call_original
+    it "defaults to a limit of #{Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT} results when limit is not given" do
+      expect(CoffeeShop).to receive(:limit).with(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT).and_call_original
 
       post_graphql(<<~GRAPHQL)
         query {
@@ -98,8 +98,8 @@ RSpec.describe "POST /graphql", type: :request do
       expect(shops.map { |s| s["name"] }).to contain_exactly("100% Coffee")
     end
 
-    it "caps filtered results to guard against an unbounded response" do
-      (Types::QueryType::MAX_COFFEE_SHOPS + 2).times { |n| create(:coffee_shop, name: "Filtered #{n}") }
+    it "defaults filtered results to the default limit when limit is not given" do
+      (Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT + 2).times { |n| create(:coffee_shop, name: "Filtered #{n}") }
 
       post_graphql(<<~GRAPHQL, variables: { name: "Filtered" })
         query($name: String) {
@@ -110,7 +110,128 @@ RSpec.describe "POST /graphql", type: :request do
       GRAPHQL
 
       shops = response.parsed_body.dig("data", "coffeeShops")
-      expect(shops.size).to eq(Types::QueryType::MAX_COFFEE_SHOPS)
+      expect(shops.size).to eq(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT)
+    end
+
+    describe "limit argument" do
+      it "returns at most the requested number of results when a valid positive limit is given" do
+        4.times { |n| create(:coffee_shop, name: "Shop #{n}") }
+
+        post_graphql(<<~GRAPHQL, variables: { limit: 2 })
+          query($limit: Int) {
+            coffeeShops(limit: $limit) {
+              name
+            }
+          }
+        GRAPHQL
+
+        expect(response).to have_http_status(:ok)
+        shops = response.parsed_body.dig("data", "coffeeShops")
+        expect(shops.size).to eq(2)
+      end
+
+      it "combines the limit argument with the name filter" do
+        3.times { |n| create(:coffee_shop, name: "Filtered #{n}") }
+        create(:coffee_shop, name: "Unrelated")
+
+        post_graphql(<<~GRAPHQL, variables: { name: "Filtered", limit: 1 })
+          query($name: String, $limit: Int) {
+            coffeeShops(name: $name, limit: $limit) {
+              name
+            }
+          }
+        GRAPHQL
+
+        shops = response.parsed_body.dig("data", "coffeeShops")
+        expect(shops.size).to eq(1)
+      end
+
+      it "falls back to the default limit when limit is negative" do
+        expect(CoffeeShop).to receive(:limit).with(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT).and_call_original
+
+        post_graphql(<<~GRAPHQL, variables: { limit: -1 })
+          query($limit: Int) {
+            coffeeShops(limit: $limit) {
+              name
+            }
+          }
+        GRAPHQL
+
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body["errors"]).to be_nil
+      end
+
+      it "falls back to the default limit when limit is zero" do
+        expect(CoffeeShop).to receive(:limit).with(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT).and_call_original
+
+        post_graphql(<<~GRAPHQL, variables: { limit: 0 })
+          query($limit: Int) {
+            coffeeShops(limit: $limit) {
+              name
+            }
+          }
+        GRAPHQL
+
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body["errors"]).to be_nil
+      end
+
+      it "falls back to the default limit when limit is explicitly null" do
+        expect(CoffeeShop).to receive(:limit).with(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT).and_call_original
+
+        post_graphql(<<~GRAPHQL, variables: { limit: nil })
+          query($limit: Int) {
+            coffeeShops(limit: $limit) {
+              name
+            }
+          }
+        GRAPHQL
+
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body["errors"]).to be_nil
+      end
+
+      it "returns a variable coercion error instead of executing the query when limit is a string" do
+        post_graphql(<<~GRAPHQL, variables: { limit: "2" })
+          query($limit: Int) {
+            coffeeShops(limit: $limit) {
+              name
+            }
+          }
+        GRAPHQL
+
+        expect(response.parsed_body["errors"]).to be_present
+        expect(response.parsed_body["data"]).to be_nil
+      end
+
+      it "rejects a SQL-injection-like string limit as a coercion error without touching the database" do
+        create(:coffee_shop, name: "Survivor")
+
+        post_graphql(<<~GRAPHQL, variables: { limit: "1; DROP TABLE coffee_shops;" })
+          query($limit: Int) {
+            coffeeShops(limit: $limit) {
+              name
+            }
+          }
+        GRAPHQL
+
+        expect(response.parsed_body["errors"]).to be_present
+        expect(response.parsed_body["data"]).to be_nil
+        expect(CoffeeShop.count).to eq(1)
+      end
+
+      it "returns a variable coercion error instead of executing the query when limit is a float" do
+        post_graphql(<<~GRAPHQL, variables: { limit: 1.5 })
+          query($limit: Int) {
+            coffeeShops(limit: $limit) {
+              name
+            }
+          }
+        GRAPHQL
+
+        expect(response.parsed_body["errors"]).to be_present
+        expect(response.parsed_body["data"]).to be_nil
+      end
     end
 
     it "returns all coffee shops when name is not given" do
