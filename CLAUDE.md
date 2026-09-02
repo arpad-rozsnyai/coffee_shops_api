@@ -49,11 +49,17 @@ that hits the network needs a `stub_request` (see `spec/services/csv_client_spec
 
 ## Architecture
 
-**No database, period.** ActiveRecord, ActiveJob, and ActionCable (and the Rails 8 defaults that ride
-along with them — `sqlite3`, `solid_cache`/`solid_queue`/`solid_cable`, `db/`, `config/database.yml`,
-`config/cable.yml`) have all been removed — nothing in this app persists, enqueues jobs, or uses
-websockets. Coffee shops are fetched from a remote CSV on each request and modeled as a plain Ruby
-object.
+**ActiveRecord + PostgreSQL are wired up, but nothing persists yet.** `active_record/railtie` is
+required in `config/application.rb`, the `pg` gem is in the `Gemfile`, and `config/database.yml`
+configures the `coffee_shops_api_{development,test,production}` databases (`bin/rails db:create` has
+been run for dev/test). This is infrastructure only — there is deliberately no `db/` directory, no
+migrations, and no ActiveRecord models yet; that's the next feature. Until then, the request-time
+pipeline below is unchanged: coffee shops are still fetched from a remote CSV on each request and
+modeled as a plain Ruby object, not a database row.
+
+ActiveJob and ActionCable (and the other Rails 8 defaults that ride along with them —
+`solid_cache`/`solid_queue`/`solid_cable`, `config/cable.yml`) remain removed — nothing in this app
+enqueues jobs or uses websockets.
 
 **Request-time pipeline** (fetch → parse → [selection] → [render], each step decoupled and independently
 testable):
@@ -75,8 +81,8 @@ testable):
    below). A well-formed but empty feed returns an empty array — that's not an error, since
    there's no header line to make "zero shops" ambiguous with "broken feed".
 4. `CoffeeShop` (`app/models/coffee_shop.rb`) — plain Ruby value object (`name`, `x`, `y`,
-   `#distance_to(x, y)` via `Math.hypot`). There's no ActiveRecord in this app at all; it lives in
-   `app/models` purely by Zeitwerk convention.
+   `#distance_to(x, y)` via `Math.hypot`), not an ActiveRecord model. It lives in `app/models` purely
+   by Zeitwerk convention.
    Returns full-precision distance; rounding to 4 decimals (per the contract) is a presentation-layer
    concern, not implemented here.
 5. `CoffeeShopRepository#all` (`app/services/coffee_shop_repository.rb`) — composes steps 2 and 3

@@ -17,6 +17,9 @@ gem "tzinfo-data", platforms: %i[ windows jruby ]
 # (CsvParser relies on stdlib CSV), so it must be declared explicitly here.
 gem "csv"
 
+# Use postgresql as the database for Active Record
+gem "pg", "~> 1.6"
+
 # Reduces boot times through caching; required in config/boot.rb
 gem "bootsnap", require: false
 
