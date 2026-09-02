@@ -77,6 +77,28 @@ RSpec.describe CoffeeShop do
 
       expect(shop).to be_valid
     end
+
+    it "is invalid with the same name and coordinates as an existing shop" do
+      create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
+      shop = build(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
+
+      expect(shop).not_to be_valid
+      expect(shop.errors[:name]).to be_present
+    end
+
+    it "is valid with the same name at different coordinates" do
+      create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
+      shop = build(:coffee_shop, name: "Starbucks", coordinate_x: 3.0, coordinate_y: 4.0)
+
+      expect(shop).to be_valid
+    end
+
+    it "is valid with the same coordinates under a different name" do
+      create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
+      shop = build(:coffee_shop, name: "Peets", coordinate_x: 1.0, coordinate_y: 2.0)
+
+      expect(shop).to be_valid
+    end
   end
 
   describe "persistence" do
