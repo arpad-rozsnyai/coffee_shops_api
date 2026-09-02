@@ -51,6 +51,84 @@ RSpec.describe "POST /graphql", type: :request do
       expect(response).to have_http_status(:ok)
     end
 
+    it "filters by a case-insensitive partial match against name" do
+      create(:coffee_shop, name: "Blue Bottle Coffee")
+      create(:coffee_shop, name: "Starbucks")
+
+      post_graphql(<<~GRAPHQL, variables: { name: "blue" })
+        query($name: String) {
+          coffeeShops(name: $name) {
+            name
+          }
+        }
+      GRAPHQL
+
+      expect(response).to have_http_status(:ok)
+      shops = response.parsed_body.dig("data", "coffeeShops")
+      expect(shops.map { |s| s["name"] }).to contain_exactly("Blue Bottle Coffee")
+    end
+
+    it "returns an empty array when the name filter matches nothing" do
+      create(:coffee_shop, name: "Starbucks")
+
+      post_graphql(<<~GRAPHQL, variables: { name: "nonexistent" })
+        query($name: String) {
+          coffeeShops(name: $name) {
+            name
+          }
+        }
+      GRAPHQL
+
+      expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
+    end
+
+    it "treats % and _ in the name filter as literal characters, not SQL wildcards" do
+      create(:coffee_shop, name: "100% Coffee")
+      create(:coffee_shop, name: "AnyCoffee")
+
+      post_graphql(<<~GRAPHQL, variables: { name: "100%" })
+        query($name: String) {
+          coffeeShops(name: $name) {
+            name
+          }
+        }
+      GRAPHQL
+
+      shops = response.parsed_body.dig("data", "coffeeShops")
+      expect(shops.map { |s| s["name"] }).to contain_exactly("100% Coffee")
+    end
+
+    it "caps filtered results to guard against an unbounded response" do
+      (Types::QueryType::MAX_COFFEE_SHOPS + 2).times { |n| create(:coffee_shop, name: "Filtered #{n}") }
+
+      post_graphql(<<~GRAPHQL, variables: { name: "Filtered" })
+        query($name: String) {
+          coffeeShops(name: $name) {
+            name
+          }
+        }
+      GRAPHQL
+
+      shops = response.parsed_body.dig("data", "coffeeShops")
+      expect(shops.size).to eq(Types::QueryType::MAX_COFFEE_SHOPS)
+    end
+
+    it "returns all coffee shops when name is not given" do
+      create(:coffee_shop, name: "Near")
+      create(:coffee_shop, name: "Far")
+
+      post_graphql(<<~GRAPHQL)
+        query {
+          coffeeShops {
+            name
+          }
+        }
+      GRAPHQL
+
+      shops = response.parsed_body.dig("data", "coffeeShops")
+      expect(shops.map { |s| s["name"] }).to contain_exactly("Near", "Far")
+    end
+
     it "works with a query sent with no variables key at all" do
       post "/graphql", params: { query: "query { coffeeShops { name } }" }
 

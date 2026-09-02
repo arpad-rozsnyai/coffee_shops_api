@@ -10,6 +10,8 @@ class CoffeeShop < ApplicationRecord
   validates :coordinate_x, :coordinate_y, presence: true
   validates :slug, presence: true, uniqueness: true
 
+  scope :name_contains, ->(fragment) { where(arel_table[:name].matches("%#{sanitize_sql_like(fragment)}%")) }
+
   def distance_to(x, y)
     Math.hypot(self.x - x, self.y - y)
   end
