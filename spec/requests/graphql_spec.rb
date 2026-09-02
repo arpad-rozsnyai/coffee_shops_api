@@ -234,6 +234,121 @@ RSpec.describe "POST /graphql", type: :request do
       end
     end
 
+    describe "highlighted" do
+      def highlighted_query_graphql
+        <<~GRAPHQL
+          query {
+            coffeeShops {
+              name
+              highlighted
+            }
+          }
+        GRAPHQL
+      end
+
+      it "flags the first three results as highlighted and leaves the rest unhighlighted" do
+        5.times { |n| create(:coffee_shop, name: "Shop #{('A'.ord + n).chr}") }
+
+        post_graphql(highlighted_query_graphql)
+
+        shops = response.parsed_body.dig("data", "coffeeShops")
+        expect(shops.size).to eq(5)
+        expect(shops.first(3).map { |s| s["highlighted"] }).to all(be true)
+        expect(shops.last(2).map { |s| s["highlighted"] }).to all(be false)
+      end
+
+      it "flags all results as highlighted when there are fewer than three" do
+        create(:coffee_shop, name: "Only One")
+
+        post_graphql(highlighted_query_graphql)
+
+        shops = response.parsed_body.dig("data", "coffeeShops")
+        expect(shops.size).to eq(1)
+        expect(shops.first["highlighted"]).to eq(true)
+      end
+
+      it "flags all results as highlighted when there are exactly three" do
+        3.times { |n| create(:coffee_shop, name: "Shop #{n}") }
+
+        post_graphql(highlighted_query_graphql)
+
+        shops = response.parsed_body.dig("data", "coffeeShops")
+        expect(shops.size).to eq(3)
+        expect(shops.map { |s| s["highlighted"] }).to all(be true)
+      end
+
+      it "returns an empty array, with no error, when there are no results to highlight" do
+        post_graphql(highlighted_query_graphql)
+
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
+      end
+
+      it "still only highlights the first three results when the limit argument raises the cap above three" do
+        5.times { |n| create(:coffee_shop, name: "Shop #{n}") }
+
+        post_graphql(<<~GRAPHQL, variables: { limit: 5 })
+          query($limit: Int) {
+            coffeeShops(limit: $limit) {
+              name
+              highlighted
+            }
+          }
+        GRAPHQL
+
+        shops = response.parsed_body.dig("data", "coffeeShops")
+        expect(shops.size).to eq(5)
+        expect(shops.first(3).map { |s| s["highlighted"] }).to all(be true)
+        expect(shops.last(2).map { |s| s["highlighted"] }).to all(be false)
+      end
+
+      it "highlights all results when the limit argument caps them below three" do
+        5.times { |n| create(:coffee_shop, name: "Shop #{n}") }
+
+        post_graphql(<<~GRAPHQL, variables: { limit: 2 })
+          query($limit: Int) {
+            coffeeShops(limit: $limit) {
+              name
+              highlighted
+            }
+          }
+        GRAPHQL
+
+        shops = response.parsed_body.dig("data", "coffeeShops")
+        expect(shops.size).to eq(2)
+        expect(shops.map { |s| s["highlighted"] }).to all(be true)
+      end
+
+      it "is false for coffeeShop(id:), which is outside the search field this flag applies to" do
+        shop = create(:coffee_shop, name: "Only")
+
+        post_graphql(<<~GRAPHQL, variables: { id: shop.id })
+          query($id: ID!) {
+            coffeeShop(id: $id) {
+              highlighted
+            }
+          }
+        GRAPHQL
+
+        expect(response.parsed_body.dig("data", "coffeeShop", "highlighted")).to eq(false)
+      end
+
+      it "is false for the shop nested inside nearestCoffeeShops, which is outside the search field this flag applies to" do
+        create(:coffee_shop, name: "Only", coordinate_x: 1, coordinate_y: 0)
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0 })
+          query($x: Float!, $y: Float!) {
+            nearestCoffeeShops(x: $x, y: $y) {
+              coffeeShop { highlighted }
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.first["coffeeShop"]["highlighted"]).to eq(false)
+      end
+    end
+
     it "returns all coffee shops when name is not given" do
       create(:coffee_shop, name: "Near")
       create(:coffee_shop, name: "Far")

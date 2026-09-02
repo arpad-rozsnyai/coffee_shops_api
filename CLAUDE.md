@@ -24,6 +24,16 @@ It reads this file for conventions, implements the feature, then drives the chan
 for code smells, SOLID/DRY/YAGNI violations, and drift from the conventions documented below — looping
 fix → re-review until two consecutive green rounds, then runs `bin/rubocop` to a clean state.
 
+## Workflow: git
+
+Never run `git commit`, `git push`, or any other state-changing git command (`reset`, `rebase`,
+`checkout`/`restore` that discards changes, `branch -D`, force-push, etc.) unless the user explicitly
+asks for that specific action in that turn. This includes when a prompt sounds git-adjacent but isn't
+— e.g. "create the PR title and description" asks for text only, not for the change to actually be
+committed/pushed/opened as a PR. Read-only git commands (`status`, `diff`, `log`) are always fine.
+Leave the working tree's changes staged/unstaged as-is for the user to commit themselves unless told
+otherwise.
+
 ## Commands
 
 ```bash

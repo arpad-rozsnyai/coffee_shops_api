@@ -8,5 +8,7 @@ module Types
     field :y, Float, null: false
     field :address, String, null: true
     field :open_until, String, null: true
+    field :highlighted, Boolean, null: false,
+      description: "True for the top results of a coffeeShops search; false otherwise"
   end
 end
