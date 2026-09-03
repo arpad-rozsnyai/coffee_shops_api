@@ -37,8 +37,8 @@ RSpec.describe "POST /graphql", type: :request do
       expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
     end
 
-    it "defaults to a limit of #{Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT} results when limit is not given" do
-      expect(CoffeeShop).to receive(:limit).with(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT).and_call_original
+    it "defaults to a limit of #{CoffeeShops::DEFAULT_LIMIT} results when limit is not given" do
+      expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_LIMIT).and_call_original
 
       post_graphql(<<~GRAPHQL)
         query {
@@ -99,7 +99,7 @@ RSpec.describe "POST /graphql", type: :request do
     end
 
     it "defaults filtered results to the default limit when limit is not given" do
-      (Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT + 2).times { |n| create(:coffee_shop, name: "Filtered #{n}") }
+      (CoffeeShops::DEFAULT_LIMIT + 2).times { |n| create(:coffee_shop, name: "Filtered #{n}") }
 
       post_graphql(<<~GRAPHQL, variables: { name: "Filtered" })
         query($name: String) {
@@ -110,7 +110,7 @@ RSpec.describe "POST /graphql", type: :request do
       GRAPHQL
 
       shops = response.parsed_body.dig("data", "coffeeShops")
-      expect(shops.size).to eq(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT)
+      expect(shops.size).to eq(CoffeeShops::DEFAULT_LIMIT)
     end
 
     describe "limit argument" do
@@ -147,7 +147,7 @@ RSpec.describe "POST /graphql", type: :request do
       end
 
       it "falls back to the default limit when limit is negative" do
-        expect(CoffeeShop).to receive(:limit).with(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT).and_call_original
+        expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_LIMIT).and_call_original
 
         post_graphql(<<~GRAPHQL, variables: { limit: -1 })
           query($limit: Int) {
@@ -162,7 +162,7 @@ RSpec.describe "POST /graphql", type: :request do
       end
 
       it "falls back to the default limit when limit is zero" do
-        expect(CoffeeShop).to receive(:limit).with(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT).and_call_original
+        expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_LIMIT).and_call_original
 
         post_graphql(<<~GRAPHQL, variables: { limit: 0 })
           query($limit: Int) {
@@ -177,7 +177,7 @@ RSpec.describe "POST /graphql", type: :request do
       end
 
       it "falls back to the default limit when limit is explicitly null" do
-        expect(CoffeeShop).to receive(:limit).with(Types::QueryType::DEFAULT_COFFEE_SHOPS_LIMIT).and_call_original
+        expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_LIMIT).and_call_original
 
         post_graphql(<<~GRAPHQL, variables: { limit: nil })
           query($limit: Int) {
@@ -413,7 +413,7 @@ RSpec.describe "POST /graphql", type: :request do
   end
 
   describe "nearestCoffeeShops" do
-    it "returns the three nearest persisted shops ordered nearest to farthest, with distance" do
+    it "returns persisted shops ordered nearest to farthest, with distance" do
       create(:coffee_shop, name: "Far", coordinate_x: 10, coordinate_y: 0)
       create(:coffee_shop, name: "Near", coordinate_x: 1, coordinate_y: 0)
       create(:coffee_shop, name: "Farthest", coordinate_x: 20, coordinate_y: 0)
@@ -431,7 +431,7 @@ RSpec.describe "POST /graphql", type: :request do
       GRAPHQL
 
       results = response.parsed_body.dig("data", "nearestCoffeeShops")
-      expect(results.map { |r| r["coffeeShop"]["name"] }).to eq(%w[Near Mid Far])
+      expect(results.map { |r| r["coffeeShop"]["name"] }).to eq(%w[Near Mid Far Farthest])
       expect(results.first["distance"]).to eq(1.0)
     end
 
@@ -476,7 +476,7 @@ RSpec.describe "POST /graphql", type: :request do
       expect(results.first["distance"]).to eq(1.4142)
     end
 
-    it "returns fewer than three results when fewer shops exist" do
+    it "returns fewer than the default limit of results when fewer shops exist" do
       create(:coffee_shop, name: "Only", coordinate_x: 1, coordinate_y: 0)
 
       post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0 })
@@ -517,6 +517,146 @@ RSpec.describe "POST /graphql", type: :request do
 
       results = response.parsed_body.dig("data", "nearestCoffeeShops")
       expect(results.map { |r| r["coffeeShop"]["name"] }).to eq([ "A Shop", "B Shop" ])
+    end
+
+    describe "name argument" do
+      it "restricts results to shops matching a case-insensitive partial name" do
+        create(:coffee_shop, name: "Blue Bottle Coffee", coordinate_x: 1, coordinate_y: 0)
+        create(:coffee_shop, name: "Starbucks", coordinate_x: 2, coordinate_y: 0)
+        create(:coffee_shop, name: "Blue Sky Coffee", coordinate_x: 10, coordinate_y: 0)
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, name: "blue" })
+          query($x: Float!, $y: Float!, $name: String) {
+            nearestCoffeeShops(x: $x, y: $y, name: $name) {
+              coffeeShop { name }
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.map { |r| r["coffeeShop"]["name"] }).to eq([ "Blue Bottle Coffee", "Blue Sky Coffee" ])
+      end
+
+      it "returns an empty array when the name filter matches nothing" do
+        create(:coffee_shop, name: "Starbucks", coordinate_x: 1, coordinate_y: 0)
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, name: "nonexistent" })
+          query($x: Float!, $y: Float!, $name: String) {
+            nearestCoffeeShops(x: $x, y: $y, name: $name) {
+              coffeeShop { name }
+            }
+          }
+        GRAPHQL
+
+        expect(response.parsed_body.dig("data", "nearestCoffeeShops")).to eq([])
+      end
+
+      it "combines the name filter with the limit argument" do
+        create(:coffee_shop, name: "Blue Bottle Coffee", coordinate_x: 1, coordinate_y: 0)
+        create(:coffee_shop, name: "Blue Sky Coffee", coordinate_x: 2, coordinate_y: 0)
+        create(:coffee_shop, name: "Starbucks", coordinate_x: 3, coordinate_y: 0)
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, name: "blue", limit: 1 })
+          query($x: Float!, $y: Float!, $name: String, $limit: Int) {
+            nearestCoffeeShops(x: $x, y: $y, name: $name, limit: $limit) {
+              coffeeShop { name }
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.map { |r| r["coffeeShop"]["name"] }).to eq([ "Blue Bottle Coffee" ])
+      end
+    end
+
+    describe "limit argument" do
+      it "returns at most the requested number of results when a valid positive limit is given" do
+        4.times { |n| create(:coffee_shop, name: "Shop #{n}", coordinate_x: n, coordinate_y: 0) }
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, limit: 2 })
+          query($x: Float!, $y: Float!, $limit: Int) {
+            nearestCoffeeShops(x: $x, y: $y, limit: $limit) {
+              coffeeShop { name }
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(2)
+      end
+
+      it "raises the cap above the default limit when given a larger limit" do
+        (CoffeeShops::DEFAULT_LIMIT + 1).times { |n| create(:coffee_shop, name: "Shop #{n}", coordinate_x: n, coordinate_y: 0) }
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, limit: CoffeeShops::DEFAULT_LIMIT + 1 })
+          query($x: Float!, $y: Float!, $limit: Int) {
+            nearestCoffeeShops(x: $x, y: $y, limit: $limit) {
+              coffeeShop { name }
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(CoffeeShops::DEFAULT_LIMIT + 1)
+      end
+
+      it "falls back to the default limit when limit is negative" do
+        5.times { |n| create(:coffee_shop, name: "Shop #{n}", coordinate_x: n, coordinate_y: 0) }
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, limit: -1 })
+          query($x: Float!, $y: Float!, $limit: Int) {
+            nearestCoffeeShops(x: $x, y: $y, limit: $limit) {
+              coffeeShop { name }
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(CoffeeShops::DEFAULT_LIMIT)
+      end
+
+      it "falls back to the default limit when limit is zero" do
+        5.times { |n| create(:coffee_shop, name: "Shop #{n}", coordinate_x: n, coordinate_y: 0) }
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, limit: 0 })
+          query($x: Float!, $y: Float!, $limit: Int) {
+            nearestCoffeeShops(x: $x, y: $y, limit: $limit) {
+              coffeeShop { name }
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(CoffeeShops::DEFAULT_LIMIT)
+      end
+
+      it "falls back to the default limit when limit is explicitly null" do
+        5.times { |n| create(:coffee_shop, name: "Shop #{n}", coordinate_x: n, coordinate_y: 0) }
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, limit: nil })
+          query($x: Float!, $y: Float!, $limit: Int) {
+            nearestCoffeeShops(x: $x, y: $y, limit: $limit) {
+              coffeeShop { name }
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(CoffeeShops::DEFAULT_LIMIT)
+      end
+
+      it "returns a variable coercion error instead of executing the query when limit is a string" do
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, limit: "2" })
+          query($x: Float!, $y: Float!, $limit: Int) {
+            nearestCoffeeShops(x: $x, y: $y, limit: $limit) {
+              coffeeShop { name }
+            }
+          }
+        GRAPHQL
+
+        expect(response.parsed_body["errors"]).to be_present
+        expect(response.parsed_body["data"]).to be_nil
+      end
     end
   end
 
