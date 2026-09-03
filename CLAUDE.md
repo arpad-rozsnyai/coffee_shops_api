@@ -77,7 +77,7 @@ databases. `CoffeeShop` (`app/models/coffee_shop.rb`) is an `ApplicationRecord` 
 `slug` (all `null: false`), plus nullable `address` and `open_until`. `name`/`coordinate_x`/
 `coordinate_y` also carry `presence` validations, pairing the DB constraint with a model-level one.
 `alias_attribute :x, :coordinate_x` and `alias_attribute :y, :coordinate_y` give it a short `x`/`y`
-interface used throughout (`#distance_to(x, y)`, `NearestCoffeeShopsFinder`, the GraphQL types).
+interface used throughout (`NearestCoffeeShopsFinder`, the GraphQL types).
 
 **`slug` is the uniqueness anchor, not `[name, coordinate_x, coordinate_y]`.** The old composite
 unique index on those three columns is gone — `slug` (unique index, `presence`+`uniqueness`
@@ -138,6 +138,15 @@ populates the table; the request-time pipeline is GraphQL-only and only ever rea
 
 **Request-time pipeline** (GraphQL only — there is no REST API):
 
+`CoffeeShops::DEFAULT_LIMIT` (`config/initializers/coffee_shops.rb`, currently `5`) is the single
+shared fallback for every GraphQL `limit` argument left unspecified — both `coffeeShops` and
+`nearestCoffeeShops` reference it rather than each carrying its own default constant, specifically so
+that changing "what does an unspecified limit default to" is a one-line change in one place, not a
+per-field one. Don't reintroduce a field-local default constant (e.g. a `DEFAULT_COFFEE_SHOPS_LIMIT`
+on `Types::QueryType` or a `DEFAULT_LIMIT` on `NearestCoffeeShopsFinder`) even if a field's default
+value should later diverge from the others — extend `CoffeeShops` with a second, more specific
+constant instead of duplicating the "positive integer, else fall back" check per field.
+
 1. `POST /graphql` → `GraphqlController#execute` (`app/controllers/graphql_controller.rb`) — executes
    `params[:query]`/`params[:variables]`/`params[:operationName]` against `CoffeeShopsApiSchema` and
    renders the result as-is. `#prepare_variables` normalizes `variables` whether it arrives as a
@@ -154,20 +163,37 @@ populates the table; the request-time pipeline is GraphQL-only and only ever rea
      **not an array**. This is deliberate GraphQL convention (singular field name → nullable single
      object; plural field name → non-null list) and was specifically confirmed against an
      interviewer's feedback — don't "fix" it into an array for consistency with the other fields.
-   - `nearestCoffeeShops(x: Float!, y: Float!)` — `NearestCoffeeShopsFinder.new(repository:
-     CoffeeShop).call(x:, y:)`. Passing the `CoffeeShop` AR class itself as `repository:` works because
-     the finder only ever calls `repository.all`, and `CoffeeShop.all` satisfies that — no separate "DB
-     repository" class exists or is needed for this.
+   - `nearestCoffeeShops(x: Float!, y: Float!, name: String, limit: Int)` —
+     `NearestCoffeeShopsFinder.new(repository: CoffeeShop).call(x:, y:, name:, limit:)`. `limit` follows
+     the same "default when omitted/null/non-positive" rule as `coffeeShops`' `limit`
+     (`Types::QueryType#positive_or_default`, shared by both fields), and the two fields share the same
+     fallback value too — `CoffeeShops::DEFAULT_LIMIT`, not a per-field constant (see above). `name` is
+     the same case-insensitive partial match as `coffeeShops`' `name` (`CoffeeShop.name_contains`) —
+     when given, only matching shops are considered before finding/ordering the nearest ones; when
+     omitted, every shop is a candidate, same as before this argument existed.
 3. `Types::CoffeeShopType` / `Types::NearestCoffeeShopType` (`app/graphql/types/`) — render the
    response directly from `CoffeeShop`/`{coffee_shop:, distance:}`; there's no separate serializer
    class the way REST had one. `NearestCoffeeShopType#distance` is where the once-only 4-decimal
    rounding happens now (a presentation concern, same reasoning as before, just relocated).
-4. `NearestCoffeeShopsFinder#call(x:, y:)` (`app/services/nearest_coffee_shops_finder.rb`) — pairs each
-   shop with `{ coffee_shop:, distance: }` via `CoffeeShop#distance_to` (`Math.hypot`), and takes the 3
-   nearest via `min_by(MAX_RESULTS) { [distance, name] }` — a partial selection rather than a full
-   sort, since only the top `MAX_RESULTS` are ever needed. Name is a tiebreaker for deterministic
-   ordering on exact distance ties. `repository:` is a **required** keyword arg (no default) — there's
-   only ever one caller now, and it always passes `CoffeeShop` explicitly.
+4. `NearestCoffeeShopsFinder#call(x:, y:, name: nil, limit: nil)`
+   (`app/services/nearest_coffee_shops_finder.rb`) — when `name` is present, `repository.name_contains`
+   narrows the scope before the distance `SELECT`/`ORDER`/`LIMIT` chain is applied on top of it,
+   otherwise `repository` itself (unfiltered) is used; this means `repository:` now also needs to
+   support `.name_contains` (a `CoffeeShop`-specific scope), reinforcing that this parameter isn't a
+   generic repository abstraction — it's always `CoffeeShop`, by design (see below). The distance
+   calculation and the nearest-first ordering both happen in the database, not Ruby:
+   `SELECT coffee_shops.*, SQRT(POWER(coordinate_x - ?, 2) + POWER(coordinate_y - ?, 2)) AS distance`
+   (bound via `sanitize_sql_array`, not string interpolation) `ORDER BY distance ASC, name ASC LIMIT
+   ?`. Plain SQL, no PostGIS/geospatial
+   extension — this is a flat 2D Euclidean distance, which plain arithmetic already expresses exactly;
+   reach for PostGIS only if the columns ever become real geographic coordinates needing great-circle
+   distance. `name` is a second `ORDER BY` column (not a Ruby tiebreaker) for deterministic ordering on
+   exact distance ties. Postgres returns the computed `distance` column typed as a float already
+   (confirmed against the real adapter — no manual cast needed), so `shop.distance` in the `.map` is a
+   `Float` even though `distance` isn't a real column on `CoffeeShop`. `repository:` is a **required**
+   keyword arg (no default) — there's only ever one caller now, and it always passes `CoffeeShop`
+   explicitly; it must support `.select`/`.order`/`.limit`/`.sanitize_sql_array`, not just `.all` (an
+   AR class or relation, not an arbitrary object).
 
 `HomeController` (`app/controllers/home_controller.rb`) only has `index` — a static landing page, no
 data pipeline involved. An HTML `/search` form was added and then removed again the same session
@@ -208,7 +234,8 @@ Only `CoffeeShopRepository` (a thin `parser.parse(client.fetch)` wrapper that ex
 the old request-time CSV pipeline) was genuinely orphaned and removed along with REST.
 
 **Namespacing convention:** `CoffeeShops` (plural module, `config/initializers/coffee_shops.rb`) is
-config-only — just `CoffeeShops.csv_url`. Everything under `app/services/` and `app/models/` is a
+config-only — `CoffeeShops.csv_url` and the `CoffeeShops::DEFAULT_LIMIT` constant. Everything under
+`app/services/` and `app/models/` is a
 flat, top-level class (`CsvClient`, `CsvParser`, `CoffeeShop`, ...) with no app-specific module
 nesting — matches the directory layout 1:1, per Zeitwerk convention. `app/graphql/types/` is the one
 place that *does* nest under a module (`Types::`) — that's standard graphql-ruby convention, still
@@ -232,7 +259,9 @@ the whole file and defines the nested error constant as a side effect. If you ad
 class, nest it inside its raising class the same way — don't give it its own top-level file.
 
 **Hard constraints for this codebase** (do not reintroduce without discussion):
-- No Geocoder or other distance/geospatial gem — stdlib `Math.hypot` only.
+- No Geocoder, PostGIS, or other geospatial gem/extension — nearest-shop distance is a flat 2D
+  Euclidean calculation done in plain SQL (`SQRT(POWER(...))`) inside `NearestCoffeeShopsFinder`, not
+  Ruby (`CoffeeShop#distance_to`/`Math.hypot` were removed once the calculation moved into the DB).
 - No CSV-parsing gem — stdlib `CSV` only.
 - No dotenv — env vars are read directly via `ENV.fetch`.
 - No REST API — GraphQL (`POST /graphql`) is the only live query interface; see above.

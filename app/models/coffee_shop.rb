@@ -14,10 +14,6 @@ class CoffeeShop < ApplicationRecord
 
   attr_writer :highlighted
 
-  def distance_to(x, y)
-    Math.hypot(self.x - x, self.y - y)
-  end
-
   # Not a persisted column - set per result by the coffeeShops GraphQL resolver to flag
   # top search results. Defaults to false so CoffeeShopType's non-null field always resolves.
   def highlighted
