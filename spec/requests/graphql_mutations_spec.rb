@@ -73,6 +73,36 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
       expect(CoffeeShop.count).to eq(0)
     end
 
+    it "returns an error and creates nothing when openUntil is an empty string" do
+      post_graphql(create_mutation, variables: {
+        name: "Test3", x: 1.0, y: 2.0, address: "123 Main St", openUntil: ""
+      })
+
+      payload = response.parsed_body.dig("data", "createCoffeeShop")
+      expect(payload["coffeeShop"]).to be_nil
+      expect(payload["errors"]).to eq([ "Open until can't be blank" ])
+      expect(CoffeeShop.count).to eq(0)
+    end
+
+    it "returns an error and creates nothing when address is a whitespace-only string" do
+      post_graphql(create_mutation, variables: {
+        name: "Test3", x: 1.0, y: 2.0, address: "   ", openUntil: "9pm"
+      })
+
+      payload = response.parsed_body.dig("data", "createCoffeeShop")
+      expect(payload["coffeeShop"]).to be_nil
+      expect(payload["errors"]).to eq([ "Address can't be blank" ])
+      expect(CoffeeShop.count).to eq(0)
+    end
+
+    it "returns both errors when address and openUntil are both blank" do
+      post_graphql(create_mutation, variables: { name: "Test3", x: 1.0, y: 2.0, address: "", openUntil: "" })
+
+      payload = response.parsed_body.dig("data", "createCoffeeShop")
+      expect(payload["errors"]).to contain_exactly("Address can't be blank", "Open until can't be blank")
+      expect(CoffeeShop.count).to eq(0)
+    end
+
     it "returns a variable coercion error instead of executing the mutation when x is not a number" do
       post_graphql(create_mutation, variables: {
         name: "Starbucks", x: "not-a-number", y: 2.0, address: "123 Main St", openUntil: "9pm"

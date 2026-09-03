@@ -155,14 +155,17 @@ populates the table; the request-time pipeline is GraphQL-only and only ever rea
 
 **Request-time pipeline** (GraphQL only — there is no REST API):
 
-`CoffeeShops::DEFAULT_LIMIT` (`config/initializers/coffee_shops.rb`, currently `5`) is the single
-shared fallback for every GraphQL `limit` argument left unspecified — both `coffeeShops` and
-`nearestCoffeeShops` reference it rather than each carrying its own default constant, specifically so
-that changing "what does an unspecified limit default to" is a one-line change in one place, not a
-per-field one. Don't reintroduce a field-local default constant (e.g. a `DEFAULT_COFFEE_SHOPS_LIMIT`
-on `Types::QueryType` or a `DEFAULT_LIMIT` on `NearestCoffeeShopsFinder`) even if a field's default
-value should later diverge from the others — extend `CoffeeShops` with a second, more specific
-constant instead of duplicating the "positive integer, else fall back" check per field.
+`CoffeeShops::DEFAULT_LIMIT` (`config/initializers/coffee_shops.rb`, currently `5`) is the shared
+fallback for any GraphQL `limit` argument left unspecified that wants a small, "top N results"-sized
+default — currently just `nearestCoffeeShops`. `coffeeShops` uses its own, separate
+`CoffeeShops::DEFAULT_INDEX_LIMIT` (currently `500`) instead: it's the guarded index/listing field
+(browse everything, find an `id` to pass to `updateCoffeeShop`/`deleteCoffeeShop` — see Authentication
+below for why it's guarded), where a small search-sized default isn't useful, unlike an actual
+nearest-neighbor search. This is the divergence this file already anticipated — don't reintroduce a
+field-local default constant (e.g. a `DEFAULT_COFFEE_SHOPS_LIMIT` on `Types::QueryType` or a
+`DEFAULT_LIMIT` on `NearestCoffeeShopsFinder`); both constants still live on the shared `CoffeeShops`
+module, `Types::QueryType#positive_or_default(limit, default: ...)` takes the applicable one as an
+argument rather than each field hardcoding its own fallback inline.
 
 1. `POST /graphql` → `GraphqlController#execute` (`app/controllers/graphql_controller.rb`) — executes
    `params[:query]`/`params[:variables]`/`params[:operationName]` against `CoffeeShopsApiSchema` and
@@ -177,9 +180,11 @@ constant instead of duplicating the "positive integer, else fall back" check per
    `login`/`refreshToken` auth mutations (see Authentication below). They landed as separate features
    and share nothing but the mutation root — don't assume a change to one implies anything about the
    other. Three query fields:
-   - `coffeeShops` — `CoffeeShop.limit(MAX_COFFEE_SHOPS)` (currently `500`). Capped because this is the
-     only "list everything" field in the app; every other field is inherently bounded. If you add
-     pagination later, replace the flat cap rather than layering an argument on top of it.
+   - `coffeeShops(name: String, limit: Int)` — `CoffeeShop.name_contains(name)` when `name` is given,
+     else plain `CoffeeShop`, then `.limit(positive_or_default(limit, default:
+     CoffeeShops::DEFAULT_INDEX_LIMIT)).order(:id)`. Capped because this is the only "list everything"
+     field in the app; every other field is inherently bounded. If you add pagination later, replace
+     the flat cap rather than layering an argument on top of it.
    - `coffeeShop(id: ID!)` — `CoffeeShop.find_by(id:)`, returns a nullable single `CoffeeShopType`,
      **not an array**. This is deliberate GraphQL convention (singular field name → nullable single
      object; plural field name → non-null list) and was specifically confirmed against an
@@ -187,11 +192,12 @@ constant instead of duplicating the "positive integer, else fall back" check per
    - `nearestCoffeeShops(x: Float!, y: Float!, name: String, limit: Int)` —
      `NearestCoffeeShopsFinder.new(repository: CoffeeShop).call(x:, y:, name:, limit:)`. `limit` follows
      the same "default when omitted/null/non-positive" rule as `coffeeShops`' `limit`
-     (`Types::QueryType#positive_or_default`, shared by both fields), and the two fields share the same
-     fallback value too — `CoffeeShops::DEFAULT_LIMIT`, not a per-field constant (see above). `name` is
-     the same case-insensitive partial match as `coffeeShops`' `name` (`CoffeeShop.name_contains`) —
-     when given, only matching shops are considered before finding/ordering the nearest ones; when
-     omitted, every shop is a candidate, same as before this argument existed.
+     (`Types::QueryType#positive_or_default`, shared by both fields) but falls back to
+     `CoffeeShops::DEFAULT_LIMIT`, not `coffeeShops`' `DEFAULT_INDEX_LIMIT` (see above) — the two
+     fields deliberately diverge here. `name` is the same case-insensitive partial match as
+     `coffeeShops`' `name` (`CoffeeShop.name_contains`) — when given, only matching shops are
+     considered before finding/ordering the nearest ones; when omitted, every shop is a candidate,
+     same as before this argument existed.
 3. `Types::CoffeeShopType` / `Types::NearestCoffeeShopType` (`app/graphql/types/`) — render the
    response directly from `CoffeeShop`/`{coffee_shop:, distance:}`; there's no separate serializer
    class the way REST had one. `NearestCoffeeShopType#distance` is where the once-only 4-decimal
@@ -233,8 +239,20 @@ constant instead of duplicating the "positive integer, else fall back" check per
    rather than duplicating the not-found lookup and message.
 
    `createCoffeeShop`'s `address`/`openUntil` arguments are `required: true` (non-null in the schema)
-   — every coffee shop created through the API must have both. `updateCoffeeShop`'s are `required:
-   false`, and deliberately not just "optional" but **preserve-if-blank**: `UpdateCoffeeShop
+   — every coffee shop created through the API must have both. `required: true` only guarantees
+   *present*, though — GraphQL's own argument coercion happily accepts `""` for a non-null `String!`,
+   so `Mutations::CreateCoffeeShop#resolve` also runs `#blank_argument_errors`
+   (`MANDATORY_STRING_ARGUMENTS = %i[address open_until]`) before ever building the record, returning
+   `"Address can't be blank"`/`"Open until can't be blank"` on the mutation's own `errors:` payload for
+   an empty or whitespace-only value, short-circuiting before `CoffeeShop.new`/`#save` are even called.
+   **This check is deliberately in the mutation, not a `CoffeeShop` model validation** — asked for and
+   confirmed explicitly: a model-level presence validation on `address`/`open_until` would also reject
+   `CoffeeShopImporter`'s CSV-imported shops, which legitimately have `nil` for both (the feed has no
+   columns for them) and must stay valid. A model validation that excluded only `""` while still
+   allowing `nil` was tried and works fine in isolation, but was rejected anyway for living on the
+   model at all - don't reintroduce it there even in that nil-safe form without discussion.
+   `updateCoffeeShop`'s are `required: false`, and deliberately not just "optional" but
+   **preserve-if-blank**: `UpdateCoffeeShop
    ::PRESERVE_IF_BLANK` names `address`/`open_until`, and `#without_blanks` strips either from the
    resolved `attrs` before calling `CoffeeShop#update` if its value is `nil` or `""` (checked with
    `#blank?`, so whitespace-only counts too) — whether that's because the client omitted the argument,
@@ -400,20 +418,37 @@ specifically for these two fields — see the "No GraphQL mutations" constraint 
   re-return the refresh token, per the original request ("the refresh EP to refresh the access token").
   `JwtDecoder::InvalidTokenError` is caught here and re-raised as `GraphQL::ExecutionError`.
 
-**Only the `CoffeeShop` CRUD mutations require authentication — search is deliberately public.**
-`coffeeShops`/`coffeeShop`/`nearestCoffeeShops` (`Types::QueryType`) and `login`/`refreshToken`
-(`Types::MutationType`) take no token at all; `createCoffeeShop`/`updateCoffeeShop`/`deleteCoffeeShop`
-(`Mutations::CreateCoffeeShop`/`UpdateCoffeeShop`/`DeleteCoffeeShop`) each require a valid one. This
-was a deliberate, explicit instruction ("guard the CRUD functionality with authentication and leave
-free the search endpoints") reversing an earlier version of this feature that gated the query fields
-instead — don't put `authenticate!` back on `Types::QueryType` without checking this is still what's
-wanted, and don't assume "coffeeShops needs a token" from an old branch/comment/memory of this feature.
+**Only `nearestCoffeeShops`, `login`, and `refreshToken` are public — everything else requires a
+token.** `coffeeShops`/`coffeeShop(id:)` (`Types::QueryType`) and all three CRUD mutations
+(`createCoffeeShop`/`updateCoffeeShop`/`deleteCoffeeShop`, `Mutations::CreateCoffeeShop`/
+`UpdateCoffeeShop`/`DeleteCoffeeShop`) require a valid access token. `nearestCoffeeShops` is the one
+deliberate exception among the query fields — an explicit product constraint ("only one free search
+endpoint... remove [the other two] from public access"), not an oversight. `coffeeShops` doubles as
+the guarded listing ("index") of every persisted shop — it already returns `id` per shop, needed to
+call `updateCoffeeShop`/`deleteCoffeeShop` — and `coffeeShop(id:)` as the guarded single-record lookup,
+so no separate admin-only field was added for either purpose; don't add one later without checking
+whether `coffeeShops`/`coffeeShop(id:)` already cover it. `login`/`refreshToken`
+(`Types::MutationType`) stay public since a client needs them to obtain a token in the first place.
+
+This scope has moved three times over the course of this feature — worth knowing so a future change
+doesn't just flip it back to whatever's most recently remembered, and doesn't assume any of the earlier
+states from an old branch/comment/memory of this feature:
+1. First: every query field required a token; no mutations existed yet.
+2. Then, once `CoffeeShop` CRUD mutations were added on a separate branch and merged in: search
+   flipped fully public (all three query fields free), and the CRUD mutations became the only guarded
+   thing — an explicit instruction at the time ("guard the CRUD functionality... leave free the search
+   endpoints").
+3. Now: `coffeeShops`/`coffeeShop(id:)` flipped back to guarded; `nearestCoffeeShops` is the sole
+   public query field, per the product constraint above.
+
 `Mutations::BaseMutation#authenticate!` (`app/graphql/mutations/base_mutation.rb`) raises
 `GraphQL::ExecutionError, "Unauthorized"` when `context[:current_user]` is blank; each of the three
-CRUD mutations' `#resolve` calls it as its first line, the same explicit-method-call pattern
-`Types::QueryType` briefly used for its own fields (see below for why that was a type-level
-`self.authorized?` override instead, and why that was rejected — the same reasoning is why the CRUD
-mutations use an explicit per-mutation call too, not a `Mutations::BaseMutation.authorized?` override).
+CRUD mutations' `#resolve` calls it as its first line. `Types::QueryType` has its own private
+`authenticate!` doing the same check (`app/graphql/types/query_type.rb`) — not shared via a common
+module, since `Types::BaseObject` and `GraphQL::Schema::Mutation` don't share an ancestor and it's one
+line each; `coffee_shops`/`coffee_shop` call it, `nearest_coffee_shops` deliberately doesn't (see
+below for why this is a plain per-field method call rather than a type-level `self.authorized?`
+override on either class).
 `GraphqlController#execute` (`app/controllers/graphql_controller.rb`) always populates
 `context[:current_user]` the same way for every request, regardless of which field (if any) ends up
 checking it: it reads an `Authorization: Bearer <token>` header, decodes it with `expected_type:
@@ -429,6 +464,10 @@ introspection itself return `{"errors"=>[{"message"=>"Unauthorized"}]}` regardle
 GraphiQL's schema explorer for every user. Introspection fields live on the query root, not the
 mutation root, so this specific failure mode wouldn't recur for `Mutations::BaseMutation` — but the
 explicit-call pattern was kept there anyway for consistency, not reintroduced as a type-level hook.
+There's now a second, independent reason a type-level override on `Types::QueryType` wouldn't work
+even ignoring introspection: `nearest_coffee_shops` must stay public while `coffee_shops`/`coffee_shop`
+don't, and `self.authorized?` gates the whole type, not individual fields — per-field method calls are
+the only way to express "some fields on this type need a token, one doesn't."
 
 **Hard constraints for this codebase** (do not reintroduce without discussion):
 - No Geocoder, PostGIS, or other geospatial gem/extension — nearest-shop distance is a flat 2D

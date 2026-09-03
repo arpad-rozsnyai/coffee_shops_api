@@ -5,13 +5,15 @@ RSpec.describe "POST /graphql", type: :request do
   let(:access_token) { JwtEncoder.new(user: user, token_type: :access).call.first }
   let(:auth_headers) { { "Authorization" => "Bearer #{access_token}" } }
 
-  def post_graphql(query, variables: {}, headers: {})
+  # coffeeShops/coffeeShop are guarded (see the "authentication" describe block) - nearestCoffeeShops
+  # overrides this default locally, since it's deliberately the one search field left public.
+  def post_graphql(query, variables: {}, headers: auth_headers)
     post "/graphql", params: { query: query, variables: variables.to_json }, headers: headers
   end
 
   # A stand-in for "a request that needs authentication" in the login/refreshToken specs below -
-  # coffeeShops et al. are public (see the "authentication" describe block), so createCoffeeShop
-  # (the actual protected resource) is what proves an access token works, or has been invalidated.
+  # createCoffeeShop is one of several protected resources now, kept as the probe since it needed no
+  # changes when coffeeShops/coffeeShop switched from public back to guarded.
   def create_coffee_shop_graphql(headers:)
     post "/graphql", params: {
       query: "mutation($name: String!, $x: Float!, $y: Float!, $address: String!, $openUntil: String!) { " \
@@ -52,8 +54,8 @@ RSpec.describe "POST /graphql", type: :request do
       expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
     end
 
-    it "defaults to a limit of #{CoffeeShops::DEFAULT_LIMIT} results when limit is not given" do
-      expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_LIMIT).and_call_original
+    it "defaults to a limit of #{CoffeeShops::DEFAULT_INDEX_LIMIT} results when limit is not given" do
+      expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_INDEX_LIMIT).and_call_original
 
       post_graphql(<<~GRAPHQL)
         query {
@@ -113,8 +115,10 @@ RSpec.describe "POST /graphql", type: :request do
       expect(shops.map { |s| s["name"] }).to contain_exactly("100% Coffee")
     end
 
-    it "defaults filtered results to the default limit when limit is not given" do
-      (CoffeeShops::DEFAULT_LIMIT + 2).times { |n| create(:coffee_shop, name: "Filtered #{n}") }
+    it "defaults filtered results to the default index limit when limit is not given" do
+      relation = CoffeeShop.name_contains("Filtered")
+      allow(CoffeeShop).to receive(:name_contains).and_return(relation)
+      expect(relation).to receive(:limit).with(CoffeeShops::DEFAULT_INDEX_LIMIT).and_call_original
 
       post_graphql(<<~GRAPHQL, variables: { name: "Filtered" })
         query($name: String) {
@@ -124,8 +128,7 @@ RSpec.describe "POST /graphql", type: :request do
         }
       GRAPHQL
 
-      shops = response.parsed_body.dig("data", "coffeeShops")
-      expect(shops.size).to eq(CoffeeShops::DEFAULT_LIMIT)
+      expect(response).to have_http_status(:ok)
     end
 
     describe "limit argument" do
@@ -162,7 +165,7 @@ RSpec.describe "POST /graphql", type: :request do
       end
 
       it "falls back to the default limit when limit is negative" do
-        expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_LIMIT).and_call_original
+        expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_INDEX_LIMIT).and_call_original
 
         post_graphql(<<~GRAPHQL, variables: { limit: -1 })
           query($limit: Int) {
@@ -177,7 +180,7 @@ RSpec.describe "POST /graphql", type: :request do
       end
 
       it "falls back to the default limit when limit is zero" do
-        expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_LIMIT).and_call_original
+        expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_INDEX_LIMIT).and_call_original
 
         post_graphql(<<~GRAPHQL, variables: { limit: 0 })
           query($limit: Int) {
@@ -192,7 +195,7 @@ RSpec.describe "POST /graphql", type: :request do
       end
 
       it "falls back to the default limit when limit is explicitly null" do
-        expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_LIMIT).and_call_original
+        expect(CoffeeShop).to receive(:limit).with(CoffeeShops::DEFAULT_INDEX_LIMIT).and_call_original
 
         post_graphql(<<~GRAPHQL, variables: { limit: nil })
           query($limit: Int) {
@@ -249,120 +252,6 @@ RSpec.describe "POST /graphql", type: :request do
       end
     end
 
-    describe "highlighted" do
-      def highlighted_query_graphql
-        <<~GRAPHQL
-          query {
-            coffeeShops {
-              name
-              highlighted
-            }
-          }
-        GRAPHQL
-      end
-
-      it "flags the first three results as highlighted and leaves the rest unhighlighted" do
-        5.times { |n| create(:coffee_shop, name: "Shop #{('A'.ord + n).chr}") }
-
-        post_graphql(highlighted_query_graphql)
-
-        shops = response.parsed_body.dig("data", "coffeeShops")
-        expect(shops.size).to eq(5)
-        expect(shops.first(3).map { |s| s["highlighted"] }).to all(be true)
-        expect(shops.last(2).map { |s| s["highlighted"] }).to all(be false)
-      end
-
-      it "flags all results as highlighted when there are fewer than three" do
-        create(:coffee_shop, name: "Only One")
-
-        post_graphql(highlighted_query_graphql)
-
-        shops = response.parsed_body.dig("data", "coffeeShops")
-        expect(shops.size).to eq(1)
-        expect(shops.first["highlighted"]).to eq(true)
-      end
-
-      it "flags all results as highlighted when there are exactly three" do
-        3.times { |n| create(:coffee_shop, name: "Shop #{n}") }
-
-        post_graphql(highlighted_query_graphql)
-
-        shops = response.parsed_body.dig("data", "coffeeShops")
-        expect(shops.size).to eq(3)
-        expect(shops.map { |s| s["highlighted"] }).to all(be true)
-      end
-
-      it "returns an empty array, with no error, when there are no results to highlight" do
-        post_graphql(highlighted_query_graphql)
-
-        expect(response).to have_http_status(:ok)
-        expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
-      end
-
-      it "still only highlights the first three results when the limit argument raises the cap above three" do
-        5.times { |n| create(:coffee_shop, name: "Shop #{n}") }
-
-        post_graphql(<<~GRAPHQL, variables: { limit: 5 })
-          query($limit: Int) {
-            coffeeShops(limit: $limit) {
-              name
-              highlighted
-            }
-          }
-        GRAPHQL
-
-        shops = response.parsed_body.dig("data", "coffeeShops")
-        expect(shops.size).to eq(5)
-        expect(shops.first(3).map { |s| s["highlighted"] }).to all(be true)
-        expect(shops.last(2).map { |s| s["highlighted"] }).to all(be false)
-      end
-
-      it "highlights all results when the limit argument caps them below three" do
-        5.times { |n| create(:coffee_shop, name: "Shop #{n}") }
-
-        post_graphql(<<~GRAPHQL, variables: { limit: 2 })
-          query($limit: Int) {
-            coffeeShops(limit: $limit) {
-              name
-              highlighted
-            }
-          }
-        GRAPHQL
-
-        shops = response.parsed_body.dig("data", "coffeeShops")
-        expect(shops.size).to eq(2)
-        expect(shops.map { |s| s["highlighted"] }).to all(be true)
-      end
-
-      it "is false for coffeeShop(id:), which is outside the search field this flag applies to" do
-        shop = create(:coffee_shop, name: "Only")
-
-        post_graphql(<<~GRAPHQL, variables: { id: shop.id })
-          query($id: ID!) {
-            coffeeShop(id: $id) {
-              highlighted
-            }
-          }
-        GRAPHQL
-
-        expect(response.parsed_body.dig("data", "coffeeShop", "highlighted")).to eq(false)
-      end
-
-      it "is false for the shop nested inside nearestCoffeeShops, which is outside the search field this flag applies to" do
-        create(:coffee_shop, name: "Only", coordinate_x: 1, coordinate_y: 0)
-
-        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0 })
-          query($x: Float!, $y: Float!) {
-            nearestCoffeeShops(x: $x, y: $y) {
-              coffeeShop { highlighted }
-            }
-          }
-        GRAPHQL
-
-        results = response.parsed_body.dig("data", "nearestCoffeeShops")
-        expect(results.first["coffeeShop"]["highlighted"]).to eq(false)
-      end
-    end
 
     it "returns all coffee shops when name is not given" do
       create(:coffee_shop, name: "Near")
@@ -381,7 +270,7 @@ RSpec.describe "POST /graphql", type: :request do
     end
 
     it "works with a query sent with no variables key at all" do
-      post "/graphql", params: { query: "query { coffeeShops { name } }" }
+      post "/graphql", params: { query: "query { coffeeShops { name } }" }, headers: auth_headers
 
       expect(response).to have_http_status(:ok)
       expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
@@ -392,7 +281,7 @@ RSpec.describe "POST /graphql", type: :request do
 
       post "/graphql",
         params: { query: "query($id: ID!) { coffeeShop(id: $id) { name } }", variables: { id: shop.id } }.to_json,
-        headers: { "CONTENT_TYPE" => "application/json" }
+        headers: auth_headers.merge("CONTENT_TYPE" => "application/json")
 
       expect(response).to have_http_status(:ok)
       expect(response.parsed_body.dig("data", "coffeeShop", "name")).to eq("Only")
@@ -428,6 +317,12 @@ RSpec.describe "POST /graphql", type: :request do
   end
 
   describe "nearestCoffeeShops" do
+    # Overrides the outer default (which sends an access token) - this is the one search field left
+    # public, so its own examples deliberately send no Authorization header at all.
+    def post_graphql(query, variables: {}, headers: {})
+      post "/graphql", params: { query: query, variables: variables.to_json }, headers: headers
+    end
+
     it "returns persisted shops ordered nearest to farthest, with distance" do
       create(:coffee_shop, name: "Far", coordinate_x: 10, coordinate_y: 0)
       create(:coffee_shop, name: "Near", coordinate_x: 1, coordinate_y: 0)
@@ -673,30 +568,99 @@ RSpec.describe "POST /graphql", type: :request do
         expect(response.parsed_body["data"]).to be_nil
       end
     end
+
+    describe "highlighted" do
+      def highlighted_query_graphql
+        <<~GRAPHQL
+          query($x: Float!, $y: Float!) {
+            nearestCoffeeShops(x: $x, y: $y) {
+              coffeeShop { name }
+              highlighted
+            }
+          }
+        GRAPHQL
+      end
+
+      it "flags the first three results as highlighted and leaves the rest unhighlighted" do
+        5.times { |n| create(:coffee_shop, name: "Shop #{n}", coordinate_x: n + 1, coordinate_y: 0) }
+
+        post_graphql(highlighted_query_graphql, variables: { x: 0, y: 0 })
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(5)
+        expect(results.first(3).map { |r| r["highlighted"] }).to all(be true)
+        expect(results.last(2).map { |r| r["highlighted"] }).to all(be false)
+      end
+
+      it "flags all results as highlighted when there are fewer than three" do
+        create(:coffee_shop, name: "Only One", coordinate_x: 1, coordinate_y: 0)
+
+        post_graphql(highlighted_query_graphql, variables: { x: 0, y: 0 })
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(1)
+        expect(results.first["highlighted"]).to eq(true)
+      end
+
+      it "flags all results as highlighted when there are exactly three" do
+        3.times { |n| create(:coffee_shop, name: "Shop #{n}", coordinate_x: n + 1, coordinate_y: 0) }
+
+        post_graphql(highlighted_query_graphql, variables: { x: 0, y: 0 })
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(3)
+        expect(results.map { |r| r["highlighted"] }).to all(be true)
+      end
+
+      it "returns an empty array, with no error, when there are no results to highlight" do
+        post_graphql(highlighted_query_graphql, variables: { x: 0, y: 0 })
+
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body.dig("data", "nearestCoffeeShops")).to eq([])
+      end
+
+      it "still only highlights the first three results when the limit argument raises the cap above three" do
+        5.times { |n| create(:coffee_shop, name: "Shop #{n}", coordinate_x: n + 1, coordinate_y: 0) }
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, limit: 5 })
+          query($x: Float!, $y: Float!, $limit: Int) {
+            nearestCoffeeShops(x: $x, y: $y, limit: $limit) {
+              coffeeShop { name }
+              highlighted
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(5)
+        expect(results.first(3).map { |r| r["highlighted"] }).to all(be true)
+        expect(results.last(2).map { |r| r["highlighted"] }).to all(be false)
+      end
+
+      it "highlights all results when the limit argument caps them below three" do
+        5.times { |n| create(:coffee_shop, name: "Shop #{n}", coordinate_x: n + 1, coordinate_y: 0) }
+
+        post_graphql(<<~GRAPHQL, variables: { x: 0, y: 0, limit: 2 })
+          query($x: Float!, $y: Float!, $limit: Int) {
+            nearestCoffeeShops(x: $x, y: $y, limit: $limit) {
+              coffeeShop { name }
+              highlighted
+            }
+          }
+        GRAPHQL
+
+        results = response.parsed_body.dig("data", "nearestCoffeeShops")
+        expect(results.size).to eq(2)
+        expect(results.map { |r| r["highlighted"] }).to all(be true)
+      end
+    end
   end
 
   describe "authentication" do
-    # Search is deliberately public - only the CRUD mutations (createCoffeeShop/updateCoffeeShop/
-    # deleteCoffeeShop, see spec/requests/graphql_mutations_spec.rb) require a token. See
-    # CLAUDE.md's Authentication section for why.
-    it "does not require a token for coffeeShops" do
-      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" }
-
-      expect(response).to have_http_status(:ok)
-      expect(response.parsed_body["errors"]).to be_nil
-      expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
-    end
-
-    it "does not require a token for coffeeShop(id:)" do
-      shop = create(:coffee_shop, name: "Only")
-
-      post "/graphql", params: { query: "query($id: ID!) { coffeeShop(id: $id) { name } }",
-        variables: { id: shop.id }.to_json }
-
-      expect(response.parsed_body["errors"]).to be_nil
-      expect(response.parsed_body.dig("data", "coffeeShop", "name")).to eq("Only")
-    end
-
+    # nearestCoffeeShops is deliberately the one search field left public - a client-driven
+    # constraint ("only one free search endpoint") - see CLAUDE.md's Authentication section.
+    # coffeeShops/coffeeShop and the CRUD mutations (spec/requests/graphql_mutations_spec.rb) all
+    # require a token.
     it "does not require a token for nearestCoffeeShops" do
       post "/graphql", params: { query: "query($x: Float!, $y: Float!) { nearestCoffeeShops(x: $x, y: $y) { distance } }",
         variables: { x: 0, y: 0 }.to_json }
@@ -710,6 +674,61 @@ RSpec.describe "POST /graphql", type: :request do
 
       expect(response.parsed_body["errors"]).to be_nil
       expect(response.parsed_body.dig("data", "__schema", "queryType", "name")).to eq("Query")
+    end
+
+    it "rejects coffeeShops with no Authorization header" do
+      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" }
+
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Unauthorized")
+      expect(response.parsed_body.dig("data", "coffeeShops")).to be_nil
+    end
+
+    it "rejects coffeeShop(id:) with no Authorization header" do
+      shop = create(:coffee_shop, name: "Only")
+
+      post "/graphql", params: { query: "query($id: ID!) { coffeeShop(id: $id) { name } }",
+        variables: { id: shop.id }.to_json }
+
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Unauthorized")
+      expect(response.parsed_body.dig("data", "coffeeShop")).to be_nil
+    end
+
+    it "rejects coffeeShops with a garbage token" do
+      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" },
+        headers: { "Authorization" => "Bearer not-a-jwt" }
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body.dig("data", "coffeeShops")).to be_nil
+    end
+
+    it "rejects coffeeShops with an expired access token" do
+      token, = JwtEncoder.new(user: user, token_type: :access).call
+
+      travel_to(Time.current + Auth::ACCESS_TOKEN_TTL + 1.second) do
+        post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" },
+          headers: { "Authorization" => "Bearer #{token}" }
+      end
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body.dig("data", "coffeeShops")).to be_nil
+    end
+
+    it "rejects coffeeShops given a refresh token where an access token is required" do
+      refresh_token, = JwtEncoder.new(user: user, token_type: :refresh).call
+
+      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" },
+        headers: { "Authorization" => "Bearer #{refresh_token}" }
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body.dig("data", "coffeeShops")).to be_nil
+    end
+
+    it "accepts coffeeShops with a valid access token" do
+      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" }, headers: auth_headers
+
+      expect(response).to have_http_status(:ok)
+      expect(response.parsed_body["errors"]).to be_nil
+      expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
     end
   end
 

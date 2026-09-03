@@ -15,14 +15,6 @@ class CoffeeShop < ApplicationRecord
 
   scope :name_contains, ->(fragment) { where(arel_table[:name].matches("%#{sanitize_sql_like(fragment)}%")) }
 
-  attr_writer :highlighted
-
-  # Not a persisted column - set per result by the coffeeShops GraphQL resolver to flag
-  # top search results. Defaults to false so CoffeeShopType's non-null field always resolves.
-  def highlighted
-    @highlighted || false
-  end
-
   private
 
   # Coordinate signs are encoded explicitly (see #signed_component) because plain #parameterize strips
