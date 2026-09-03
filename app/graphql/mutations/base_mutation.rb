@@ -7,5 +7,9 @@ module Mutations
     def find_coffee_shop(id)
       CoffeeShop.find_by(id: id)
     end
+
+    def authenticate!
+      raise GraphQL::ExecutionError, "Unauthorized" unless context[:current_user].present?
+    end
   end
 end

@@ -1,14 +1,18 @@
 require "rails_helper"
 
 RSpec.describe "POST /graphql (mutations)", type: :request do
-  def post_graphql(query, variables: {})
-    post "/graphql", params: { query: query, variables: variables.to_json }
+  let(:user) { create(:user) }
+  let(:access_token) { JwtEncoder.new(user: user, token_type: :access).call.first }
+  let(:auth_headers) { { "Authorization" => "Bearer #{access_token}" } }
+
+  def post_graphql(query, variables: {}, headers: auth_headers)
+    post "/graphql", params: { query: query, variables: variables.to_json }, headers: headers
   end
 
   describe "createCoffeeShop" do
     def create_mutation
       <<~GRAPHQL
-        mutation($name: String!, $x: Float!, $y: Float!, $address: String, $openUntil: String) {
+        mutation($name: String!, $x: Float!, $y: Float!, $address: String!, $openUntil: String!) {
           createCoffeeShop(name: $name, x: $x, y: $y, address: $address, openUntil: $openUntil) {
             coffeeShop {
               name
@@ -36,16 +40,32 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
       expect(CoffeeShop.find_by(name: "Starbucks")).to be_present
     end
 
-    it "creates a coffee shop without optional address/openUntil" do
-      post_graphql(create_mutation, variables: { name: "Peets", x: 1.0, y: 2.0 })
+    it "returns a variable coercion error instead of executing the mutation when address is omitted" do
+      post "/graphql", params: {
+        query: "mutation($name: String!, $x: Float!, $y: Float!, $openUntil: String!) { " \
+          "createCoffeeShop(name: $name, x: $x, y: $y, openUntil: $openUntil) { errors } }",
+        variables: { name: "Peets", x: 1.0, y: 2.0, openUntil: "9pm" }.to_json
+      }, headers: auth_headers
 
-      payload = response.parsed_body.dig("data", "createCoffeeShop")
-      expect(payload["errors"]).to eq([])
-      expect(payload["coffeeShop"]).to include("name" => "Peets", "address" => nil, "openUntil" => nil)
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+      expect(CoffeeShop.count).to eq(0)
+    end
+
+    it "returns a variable coercion error instead of executing the mutation when openUntil is omitted" do
+      post "/graphql", params: {
+        query: "mutation($name: String!, $x: Float!, $y: Float!, $address: String!) { " \
+          "createCoffeeShop(name: $name, x: $x, y: $y, address: $address) { errors } }",
+        variables: { name: "Peets", x: 1.0, y: 2.0, address: "123 Main St" }.to_json
+      }, headers: auth_headers
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+      expect(CoffeeShop.count).to eq(0)
     end
 
     it "returns validation errors and creates nothing when name is blank" do
-      post_graphql(create_mutation, variables: { name: "", x: 1.0, y: 2.0 })
+      post_graphql(create_mutation, variables: { name: "", x: 1.0, y: 2.0, address: "123 Main St", openUntil: "9pm" })
 
       payload = response.parsed_body.dig("data", "createCoffeeShop")
       expect(payload["coffeeShop"]).to be_nil
@@ -54,7 +74,9 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
     end
 
     it "returns a variable coercion error instead of executing the mutation when x is not a number" do
-      post_graphql(create_mutation, variables: { name: "Starbucks", x: "not-a-number", y: 2.0 })
+      post_graphql(create_mutation, variables: {
+        name: "Starbucks", x: "not-a-number", y: 2.0, address: "123 Main St", openUntil: "9pm"
+      })
 
       expect(response.parsed_body["errors"]).to be_present
       expect(response.parsed_body["data"]).to be_nil
@@ -64,7 +86,9 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
     it "returns a user-friendly duplicate error, not one that leaks the internal slug concept" do
       create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
 
-      post_graphql(create_mutation, variables: { name: "Starbucks", x: 1.0, y: 2.0 })
+      post_graphql(create_mutation, variables: {
+        name: "Starbucks", x: 1.0, y: 2.0, address: "123 Main St", openUntil: "9pm"
+      })
 
       payload = response.parsed_body.dig("data", "createCoffeeShop")
       expect(payload["coffeeShop"]).to be_nil
@@ -74,9 +98,10 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
 
     it "returns an error instead of executing the mutation when the required x argument is omitted" do
       post "/graphql", params: {
-        query: "mutation($name: String!, $y: Float!) { createCoffeeShop(name: $name, y: $y) { errors } }",
-        variables: { name: "Starbucks", y: 2.0 }.to_json
-      }
+        query: "mutation($name: String!, $y: Float!, $address: String!, $openUntil: String!) { " \
+          "createCoffeeShop(name: $name, y: $y, address: $address, openUntil: $openUntil) { errors } }",
+        variables: { name: "Starbucks", y: 2.0, address: "123 Main St", openUntil: "9pm" }.to_json
+      }, headers: auth_headers
 
       expect(response.parsed_body["errors"]).to be_present
       expect(response.parsed_body["data"]).to be_nil
@@ -110,6 +135,46 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
       expect(payload["errors"]).to eq([])
       expect(payload["coffeeShop"]).to include("name" => "Starbucks Renamed", "x" => 1.0, "address" => "123 Main St")
       expect(shop.reload.name).to eq("Starbucks Renamed")
+    end
+
+    it "leaves address unchanged when explicitly passed null, rather than blanking it out" do
+      shop = create(:coffee_shop, name: "Starbucks", address: "123 Main St")
+
+      post_graphql(update_mutation, variables: { id: shop.id, name: "Renamed", address: nil })
+
+      payload = response.parsed_body.dig("data", "updateCoffeeShop")
+      expect(payload["coffeeShop"]).to include("name" => "Renamed", "address" => "123 Main St")
+      expect(shop.reload.address).to eq("123 Main St")
+    end
+
+    it "leaves openUntil unchanged when explicitly passed an empty string, rather than blanking it out" do
+      shop = create(:coffee_shop, name: "Starbucks", open_until: "9pm")
+
+      post_graphql(update_mutation, variables: { id: shop.id, openUntil: "" })
+
+      payload = response.parsed_body.dig("data", "updateCoffeeShop")
+      expect(payload["coffeeShop"]).to include("openUntil" => "9pm")
+      expect(shop.reload.open_until).to eq("9pm")
+    end
+
+    it "still sets address to a non-blank value when one is given" do
+      shop = create(:coffee_shop, name: "Starbucks", address: "123 Main St")
+
+      post_graphql(update_mutation, variables: { id: shop.id, address: "456 Side St" })
+
+      payload = response.parsed_body.dig("data", "updateCoffeeShop")
+      expect(payload["coffeeShop"]).to include("address" => "456 Side St")
+      expect(shop.reload.address).to eq("456 Side St")
+    end
+
+    it "updates a CSV-imported shop's name without needing to supply an address or openUntil it never had" do
+      shop = create(:coffee_shop, name: "Starbucks", address: nil, open_until: nil)
+
+      post_graphql(update_mutation, variables: { id: shop.id, name: "Renamed" })
+
+      payload = response.parsed_body.dig("data", "updateCoffeeShop")
+      expect(payload["errors"]).to eq([])
+      expect(payload["coffeeShop"]).to include("name" => "Renamed", "address" => nil, "openUntil" => nil)
     end
 
     it "updates coordinates" do
@@ -191,6 +256,85 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
       payload = response.parsed_body.dig("data", "deleteCoffeeShop")
       expect(payload["coffeeShop"]).to be_nil
       expect(payload["errors"]).to eq([ "Coffee shop not found" ])
+    end
+  end
+
+  describe "authentication" do
+    # createCoffeeShop stands in for all three CRUD mutations here - they share the same
+    # BaseMutation#authenticate! check, so one mutation's worth of token-validity coverage is enough;
+    # the per-mutation describe blocks above already cover each one rejecting with no token at all.
+    def create_mutation_graphql(headers:)
+      post "/graphql", params: {
+        query: "mutation($name: String!, $x: Float!, $y: Float!, $address: String!, $openUntil: String!) { " \
+          "createCoffeeShop(name: $name, x: $x, y: $y, address: $address, openUntil: $openUntil) { errors } }",
+        variables: { name: "Probe", x: 0, y: 0, address: "123 Main St", openUntil: "9pm" }.to_json
+      }, headers: headers
+    end
+
+    it "rejects createCoffeeShop with no Authorization header" do
+      create_mutation_graphql(headers: {})
+
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Unauthorized")
+      expect(response.parsed_body.dig("data", "createCoffeeShop")).to be_nil
+      expect(CoffeeShop.count).to eq(0)
+    end
+
+    it "rejects updateCoffeeShop with no Authorization header" do
+      shop = create(:coffee_shop, name: "Starbucks")
+
+      post "/graphql", params: {
+        query: "mutation($id: ID!, $name: String!) { updateCoffeeShop(id: $id, name: $name) { errors } }",
+        variables: { id: shop.id, name: "Renamed" }.to_json
+      }
+
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Unauthorized")
+      expect(shop.reload.name).to eq("Starbucks")
+    end
+
+    it "rejects deleteCoffeeShop with no Authorization header" do
+      shop = create(:coffee_shop, name: "Starbucks")
+
+      post "/graphql", params: {
+        query: "mutation($id: ID!) { deleteCoffeeShop(id: $id) { errors } }",
+        variables: { id: shop.id }.to_json
+      }
+
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Unauthorized")
+      expect(CoffeeShop.exists?(shop.id)).to be true
+    end
+
+    it "rejects a garbage token" do
+      create_mutation_graphql(headers: { "Authorization" => "Bearer not-a-jwt" })
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(CoffeeShop.count).to eq(0)
+    end
+
+    it "rejects an expired access token" do
+      token, = JwtEncoder.new(user: user, token_type: :access).call
+
+      travel_to(Time.current + Auth::ACCESS_TOKEN_TTL + 1.second) do
+        create_mutation_graphql(headers: { "Authorization" => "Bearer #{token}" })
+      end
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(CoffeeShop.count).to eq(0)
+    end
+
+    it "rejects a refresh token presented where an access token is required" do
+      refresh_token, = JwtEncoder.new(user: user, token_type: :refresh).call
+
+      create_mutation_graphql(headers: { "Authorization" => "Bearer #{refresh_token}" })
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(CoffeeShop.count).to eq(0)
+    end
+
+    it "accepts a valid access token" do
+      create_mutation_graphql(headers: auth_headers)
+
+      expect(response.parsed_body["errors"]).to be_nil
+      expect(CoffeeShop.count).to eq(1)
     end
   end
 end
