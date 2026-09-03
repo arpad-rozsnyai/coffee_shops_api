@@ -52,6 +52,22 @@ RSpec.describe CoffeeShop do
       expect(shop.errors[:coordinate_y]).to be_present
     end
 
+    it "is invalid when coordinate_x is a non-numeric string, even though the float column would " \
+       "otherwise silently cast it to 0.0" do
+      shop = build(:coffee_shop, coordinate_x: "abc")
+
+      expect(shop.coordinate_x).to eq(0.0)
+      expect(shop).not_to be_valid
+      expect(shop.errors[:coordinate_x]).to be_present
+    end
+
+    it "is invalid when coordinate_y is a non-numeric string" do
+      shop = build(:coffee_shop, coordinate_y: "abc")
+
+      expect(shop).not_to be_valid
+      expect(shop.errors[:coordinate_y]).to be_present
+    end
+
     it "is valid without address or open_until" do
       shop = build(:coffee_shop, address: nil, open_until: nil)
 
@@ -63,7 +79,15 @@ RSpec.describe CoffeeShop do
       shop = build(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
 
       expect(shop).not_to be_valid
-      expect(shop.errors[:slug]).to be_present
+      expect(shop.errors.full_messages).to eq([ CoffeeShop::DUPLICATE_ERROR_MESSAGE ])
+    end
+
+    it "is valid updating an existing shop without re-triggering the duplicate check" do
+      shop = create(:coffee_shop, name: "Starbucks", coordinate_x: 1.0, coordinate_y: 2.0)
+
+      shop.open_until = "10pm"
+
+      expect(shop).to be_valid
     end
 
     it "is valid with the same name at different coordinates" do

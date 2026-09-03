@@ -76,12 +76,29 @@ databases. `CoffeeShop` (`app/models/coffee_shop.rb`) is an `ApplicationRecord` 
 `db/migrate/20260902163534_add_slug_to_coffee_shops.rb`): `name`, `coordinate_x`, `coordinate_y`,
 `slug` (all `null: false`), plus nullable `address` and `open_until`. `name`/`coordinate_x`/
 `coordinate_y` also carry `presence` validations, pairing the DB constraint with a model-level one.
+`coordinate_x`/`coordinate_y` additionally carry `numericality: true` — this matters because a `float`
+column silently casts a non-numeric string assignment (e.g. `"abc"`) to `0.0` before validation ever
+runs, so `presence` alone would pass; `numericality` validates against the pre-cast raw value instead
+(confirmed: `CoffeeShop.new(x: "abc", ...).coordinate_x == 0.0` yet `numericality` still flags it
+invalid) and is deliberately kept even though the only current callers (`CreateCoffeeShop`/
+`UpdateCoffeeShop` mutations) already get the same guarantee for free from GraphQL's `Float!`/`Float`
+scalar coercion — the model-level check is defense-in-depth for any other caller (console, specs, a
+future second API), not redundancy to remove.
 `alias_attribute :x, :coordinate_x` and `alias_attribute :y, :coordinate_y` give it a short `x`/`y`
 interface used throughout (`NearestCoffeeShopsFinder`, the GraphQL types).
 
 **`slug` is the uniqueness anchor, not `[name, coordinate_x, coordinate_y]`.** The old composite
-unique index on those three columns is gone — `slug` (unique index, `presence`+`uniqueness`
-validations) replaces it. It's derived, once, from `name`/`coordinate_x`/`coordinate_y` in a
+unique index on those three columns is gone — `slug` (unique index, `presence` validation, plus a
+custom `validate :slug_must_be_unique, on: :create` rather than the built-in `uniqueness: true` shorthand)
+replaces it. The custom validation exists specifically so the error reads as something a GraphQL
+caller can understand: `errors.add(:base, CoffeeShop::DUPLICATE_ERROR_MESSAGE)` instead of the
+built-in validator's default `errors.add(:slug, ...)` + "Slug has already been taken" — `slug` isn't
+accepted input and isn't exposed via GraphQL (see below), so a message naming it would reference a
+concept the caller never provided and can't see. Scoped `on: :create` (not the built-in validator's
+default of every validation run) because `slug` only exists after `#generate_slug` runs and never
+changes afterward (`attr_readonly`, see below) — an update can't introduce a new duplicate, so there's
+nothing to re-check, and no self-exclusion-by-id is needed either (a new record has no `id` yet). It's
+derived, once, from `name`/`coordinate_x`/`coordinate_y` in a
 `before_validation on: :create` callback (`CoffeeShop#generate_slug`), always overwriting any
 explicitly-assigned value — it's not accepted input, it's computed. `attr_readonly :slug` then makes
 it immutable after creation (`update`/`save` raise `ActiveRecord::ReadonlyAttributeError` if you try to
@@ -154,8 +171,8 @@ constant instead of duplicating the "positive integer, else fall back" check per
    `ActionController::Parameters`) — both are real, distinct code paths GraphQL clients use depending
    on how they encode the request; both are covered in `spec/requests/graphql_spec.rb`.
 2. `CoffeeShopsApiSchema` (`app/graphql/coffee_shops_api_schema.rb`) → `Types::QueryType`
-   (`app/graphql/types/query_type.rb`) — **query-only, no mutations** (a deliberate, current-scope
-   decision, not an oversight — write support is a separate future ticket). Three fields:
+   (`app/graphql/types/query_type.rb`) for reads, `Types::MutationType`
+   (`app/graphql/types/mutation_type.rb`) for writes. Three query fields:
    - `coffeeShops` — `CoffeeShop.limit(MAX_COFFEE_SHOPS)` (currently `500`). Capped because this is the
      only "list everything" field in the app; every other field is inherently bounded. If you add
      pagination later, replace the flat cap rather than layering an argument on top of it.
@@ -194,6 +211,23 @@ constant instead of duplicating the "positive integer, else fall back" check per
    keyword arg (no default) — there's only ever one caller now, and it always passes `CoffeeShop`
    explicitly; it must support `.select`/`.order`/`.limit`/`.sanitize_sql_array`, not just `.all` (an
    AR class or relation, not an arbitrary object).
+5. **Mutations** (`app/graphql/mutations/`, mounted on `Types::MutationType`) — `createCoffeeShop`,
+   `updateCoffeeShop`, `deleteCoffeeShop`. This is its own top-level `Mutations::` namespace under
+   `app/graphql/` (sibling to `Types::`, mirroring its own directory 1:1 the same way `Types::` does —
+   not a violation of the flat-file convention, which is scoped to `app/services`/`app/models` only),
+   following graphql-ruby's own standard mutation-class convention: each mutation is a
+   `Mutations::BaseMutation < GraphQL::Schema::Mutation` subclass with its own `argument`s and a
+   `coffee_shop`/`errors` payload, not a raised GraphQL execution error — domain validation failures
+   (blank name, non-existent id, ...) come back as `errors: [String]` on the mutation payload with
+   `coffeeShop: null`, while malformed/missing/non-numeric arguments are still rejected by GraphQL's
+   own argument coercion before the resolver ever runs (`x`/`y` are `Float!` on create, nullable
+   `Float` on update). `update`/`deleteCoffeeShop` share a `find_coffee_shop`/`NOT_FOUND_ERROR` helper
+   on `BaseMutation` rather than duplicating the not-found lookup and message. `updateCoffeeShop`'s
+   non-`id` arguments are all optional and only the ones actually supplied are passed to
+   `CoffeeShop#update` (partial update) — omitted arguments never appear in the mutation's `**attrs`
+   kwargs at all, so there's no need to distinguish "not given" from an explicit value beyond that.
+   Updating `name`/`x`/`y` does **not** regenerate `slug` — that's the model's existing
+   `attr_readonly`/`on: :create`-only behavior (see above), unchanged by mutations.
 
 `HomeController` (`app/controllers/home_controller.rb`) only has `index` — a static landing page, no
 data pipeline involved. An HTML `/search` form was added and then removed again the same session
@@ -264,5 +298,7 @@ class, nest it inside its raising class the same way — don't give it its own t
   Ruby (`CoffeeShop#distance_to`/`Math.hypot` were removed once the calculation moved into the DB).
 - No CSV-parsing gem — stdlib `CSV` only.
 - No dotenv — env vars are read directly via `ENV.fetch`.
-- No REST API — GraphQL (`POST /graphql`) is the only live query interface; see above.
-- No GraphQL mutations yet — queries only; CRUD/write support is a separate, future ticket.
+- No REST API — GraphQL (`POST /graphql`) is the only live interface, for reads and writes alike; see
+  above. CRUD is implemented as GraphQL mutations (`createCoffeeShop`/`updateCoffeeShop`/
+  `deleteCoffeeShop`, see above), deliberately chosen over reintroducing REST specifically to keep this
+  single-interface property rather than maintaining two parallel APIs for the same model.
