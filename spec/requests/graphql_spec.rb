@@ -1,8 +1,12 @@
 require "rails_helper"
 
 RSpec.describe "POST /graphql", type: :request do
-  def post_graphql(query, variables: {})
-    post "/graphql", params: { query: query, variables: variables.to_json }
+  let(:user) { create(:user) }
+  let(:access_token) { JwtEncoder.new(user: user, token_type: :access).call.first }
+  let(:auth_headers) { { "Authorization" => "Bearer #{access_token}" } }
+
+  def post_graphql(query, variables: {}, headers: auth_headers)
+    post "/graphql", params: { query: query, variables: variables.to_json }, headers: headers
   end
 
   describe "coffeeShops" do
@@ -366,7 +370,7 @@ RSpec.describe "POST /graphql", type: :request do
     end
 
     it "works with a query sent with no variables key at all" do
-      post "/graphql", params: { query: "query { coffeeShops { name } }" }
+      post "/graphql", params: { query: "query { coffeeShops { name } }" }, headers: auth_headers
 
       expect(response).to have_http_status(:ok)
       expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
@@ -377,7 +381,7 @@ RSpec.describe "POST /graphql", type: :request do
 
       post "/graphql",
         params: { query: "query($id: ID!) { coffeeShop(id: $id) { name } }", variables: { id: shop.id } }.to_json,
-        headers: { "CONTENT_TYPE" => "application/json" }
+        headers: auth_headers.merge("CONTENT_TYPE" => "application/json")
 
       expect(response).to have_http_status(:ok)
       expect(response.parsed_body.dig("data", "coffeeShop", "name")).to eq("Only")
@@ -657,6 +661,232 @@ RSpec.describe "POST /graphql", type: :request do
         expect(response.parsed_body["errors"]).to be_present
         expect(response.parsed_body["data"]).to be_nil
       end
+    end
+  end
+
+  describe "authentication" do
+    def coffee_shops_query
+      "query { coffeeShops { name } }"
+    end
+
+    it "rejects a request with no Authorization header" do
+      post "/graphql", params: { query: coffee_shops_query, variables: "{}" }
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Unauthorized")
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "rejects a request with a garbage token" do
+      post "/graphql", params: { query: coffee_shops_query, variables: "{}" },
+        headers: { "Authorization" => "Bearer not-a-jwt" }
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "rejects a request with an expired access token" do
+      token, = JwtEncoder.new(user: user, token_type: :access).call
+
+      travel_to(Time.current + Auth::ACCESS_TOKEN_TTL + 1.second) do
+        post "/graphql", params: { query: coffee_shops_query, variables: "{}" },
+          headers: { "Authorization" => "Bearer #{token}" }
+      end
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "rejects a request that presents a refresh token where an access token is required" do
+      refresh_token, = JwtEncoder.new(user: user, token_type: :refresh).call
+
+      post "/graphql", params: { query: coffee_shops_query, variables: "{}" },
+        headers: { "Authorization" => "Bearer #{refresh_token}" }
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "accepts a request with a valid access token" do
+      post "/graphql", params: { query: coffee_shops_query, variables: "{}" }, headers: auth_headers
+
+      expect(response).to have_http_status(:ok)
+      expect(response.parsed_body["errors"]).to be_nil
+      expect(response.parsed_body.dig("data", "coffeeShops")).to eq([])
+    end
+
+    it "does not require a token for schema introspection (GraphiQL relies on this)" do
+      post "/graphql", params: { query: "{ __schema { queryType { name } } }", variables: "{}" }
+
+      expect(response.parsed_body["errors"]).to be_nil
+      expect(response.parsed_body.dig("data", "__schema", "queryType", "name")).to eq("Query")
+    end
+  end
+
+  describe "login" do
+    def login_graphql(email:, password:)
+      post "/graphql", params: {
+        query: <<~GRAPHQL,
+          mutation($email: String!, $password: String!) {
+            login(email: $email, password: $password) {
+              accessToken
+              accessTokenExpiresAt
+              refreshToken
+              refreshTokenExpiresAt
+            }
+          }
+        GRAPHQL
+        variables: { email: email, password: password }.to_json
+      }
+    end
+
+    it "does not require an Authorization header" do
+      create(:user, email: "jane@example.com", password: "correct-password")
+
+      login_graphql(email: "jane@example.com", password: "correct-password")
+
+      expect(response.parsed_body["errors"]).to be_nil
+    end
+
+    it "returns an access token and a refresh token for correct credentials" do
+      create(:user, email: "jane@example.com", password: "correct-password")
+
+      login_graphql(email: "jane@example.com", password: "correct-password")
+
+      payload = response.parsed_body.dig("data", "login")
+      expect(payload["accessToken"]).to be_a(String)
+      expect(payload["refreshToken"]).to be_a(String)
+      expect(payload["accessToken"]).not_to eq(payload["refreshToken"])
+    end
+
+    it "issues an access token that is itself valid against a protected query" do
+      create(:user, email: "jane@example.com", password: "correct-password")
+      login_graphql(email: "jane@example.com", password: "correct-password")
+      access_token = response.parsed_body.dig("data", "login", "accessToken")
+
+      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" },
+        headers: { "Authorization" => "Bearer #{access_token}" }
+
+      expect(response.parsed_body["errors"]).to be_nil
+    end
+
+    it "invalidates the access token from a previous login once a new login issues another one" do
+      create(:user, email: "jane@example.com", password: "correct-password")
+      login_graphql(email: "jane@example.com", password: "correct-password")
+      first_access_token = response.parsed_body.dig("data", "login", "accessToken")
+
+      login_graphql(email: "jane@example.com", password: "correct-password")
+
+      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" },
+        headers: { "Authorization" => "Bearer #{first_access_token}" }
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "returns a generic error for a nonexistent email" do
+      login_graphql(email: "nobody@example.com", password: "whatever")
+
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Invalid email or password")
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "still runs a bcrypt comparison for a nonexistent email, to keep response timing " \
+       "independent of whether the email is registered" do
+      expect(BCrypt::Password).to receive(:new).with(Types::MutationType::DUMMY_PASSWORD_DIGEST).and_call_original
+
+      login_graphql(email: "nobody@example.com", password: "whatever")
+    end
+
+    it "returns the same generic error for an existing email with the wrong password" do
+      create(:user, email: "jane@example.com", password: "correct-password")
+
+      login_graphql(email: "jane@example.com", password: "wrong-password")
+
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Invalid email or password")
+      expect(response.parsed_body["data"]).to be_nil
+    end
+  end
+
+  describe "refreshToken" do
+    def refresh_token_graphql(refresh_token:)
+      post "/graphql", params: {
+        query: <<~GRAPHQL,
+          mutation($refreshToken: String!) {
+            refreshToken(refreshToken: $refreshToken) {
+              accessToken
+              accessTokenExpiresAt
+            }
+          }
+        GRAPHQL
+        variables: { refreshToken: refresh_token }.to_json
+      }
+    end
+
+    it "does not require an Authorization header" do
+      refresh_token, = JwtEncoder.new(user: user, token_type: :refresh).call
+
+      refresh_token_graphql(refresh_token: refresh_token)
+
+      expect(response.parsed_body["errors"]).to be_nil
+    end
+
+    it "returns a new access token for a valid refresh token" do
+      refresh_token, = JwtEncoder.new(user: user, token_type: :refresh).call
+
+      refresh_token_graphql(refresh_token: refresh_token)
+
+      access_token = response.parsed_body.dig("data", "refreshToken", "accessToken")
+      expect(access_token).to be_a(String)
+      expect(JwtDecoder.new(token: access_token, expected_type: :access).call).to eq(user)
+    end
+
+    it "rejects an access token presented as a refresh token" do
+      access_token, = JwtEncoder.new(user: user, token_type: :access).call
+
+      refresh_token_graphql(refresh_token: access_token)
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "invalidates the previously issued access token once a new one is issued" do
+      old_access_token, = JwtEncoder.new(user: user, token_type: :access).call
+      refresh_token, = JwtEncoder.new(user: user, token_type: :refresh).call
+
+      # the old access token still works right up until a new one is minted
+      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" },
+        headers: { "Authorization" => "Bearer #{old_access_token}" }
+      expect(response.parsed_body["errors"]).to be_nil
+
+      refresh_token_graphql(refresh_token: refresh_token)
+      new_access_token = response.parsed_body.dig("data", "refreshToken", "accessToken")
+
+      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" },
+        headers: { "Authorization" => "Bearer #{old_access_token}" }
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+
+      post "/graphql", params: { query: "query { coffeeShops { name } }", variables: "{}" },
+        headers: { "Authorization" => "Bearer #{new_access_token}" }
+      expect(response.parsed_body["errors"]).to be_nil
+    end
+
+    it "rejects an expired refresh token" do
+      refresh_token, = JwtEncoder.new(user: user, token_type: :refresh).call
+
+      travel_to(Time.current + Auth::REFRESH_TOKEN_TTL + 1.second) do
+        refresh_token_graphql(refresh_token: refresh_token)
+      end
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
+    end
+
+    it "rejects a garbage refresh token" do
+      refresh_token_graphql(refresh_token: "not-a-jwt")
+
+      expect(response.parsed_body["errors"]).to be_present
+      expect(response.parsed_body["data"]).to be_nil
     end
   end
 

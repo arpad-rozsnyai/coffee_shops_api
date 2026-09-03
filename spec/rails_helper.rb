@@ -58,6 +58,9 @@ RSpec.configure do |config|
   # Allows `create(:coffee_shop)` instead of `FactoryBot.create(:coffee_shop)` in specs.
   config.include FactoryBot::Syntax::Methods
 
+  # Allows `travel_to`/`travel`/`freeze_time` in specs (used to test JWT expiry).
+  config.include ActiveSupport::Testing::TimeHelpers
+
   # Filter lines from Rails gems in backtraces.
   config.filter_rails_from_backtrace!
   # arbitrary gems may also be filtered via:
