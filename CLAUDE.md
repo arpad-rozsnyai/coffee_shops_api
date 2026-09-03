@@ -172,7 +172,11 @@ constant instead of duplicating the "positive integer, else fall back" check per
    on how they encode the request; both are covered in `spec/requests/graphql_spec.rb`.
 2. `CoffeeShopsApiSchema` (`app/graphql/coffee_shops_api_schema.rb`) → `Types::QueryType`
    (`app/graphql/types/query_type.rb`) for reads, `Types::MutationType`
-   (`app/graphql/types/mutation_type.rb`) for writes. Three query fields:
+   (`app/graphql/types/mutation_type.rb`) mounting two unrelated sets of writes: `CoffeeShop` CRUD
+   (`createCoffeeShop`/`updateCoffeeShop`/`deleteCoffeeShop`, see Mutations below) and the
+   `login`/`refreshToken` auth mutations (see Authentication below). They landed as separate features
+   and share nothing but the mutation root — don't assume a change to one implies anything about the
+   other. Three query fields:
    - `coffeeShops` — `CoffeeShop.limit(MAX_COFFEE_SHOPS)` (currently `500`). Capped because this is the
      only "list everything" field in the app; every other field is inherently bounded. If you add
      pagination later, replace the flat cap rather than layering an argument on top of it.
@@ -221,11 +225,35 @@ constant instead of duplicating the "positive integer, else fall back" check per
    (blank name, non-existent id, ...) come back as `errors: [String]` on the mutation payload with
    `coffeeShop: null`, while malformed/missing/non-numeric arguments are still rejected by GraphQL's
    own argument coercion before the resolver ever runs (`x`/`y` are `Float!` on create, nullable
-   `Float` on update). `update`/`deleteCoffeeShop` share a `find_coffee_shop`/`NOT_FOUND_ERROR` helper
-   on `BaseMutation` rather than duplicating the not-found lookup and message. `updateCoffeeShop`'s
-   non-`id` arguments are all optional and only the ones actually supplied are passed to
-   `CoffeeShop#update` (partial update) — omitted arguments never appear in the mutation's `**attrs`
-   kwargs at all, so there's no need to distinguish "not given" from an explicit value beyond that.
+   `Float` on update). Each of the three CRUD mutations' `#resolve` calls `authenticate!`
+   (`Mutations::BaseMutation`, an explicit per-mutation call, not a type-level `authorized?` — see
+   Authentication below for why) as its first line — `createCoffeeShop`/`updateCoffeeShop`/
+   `deleteCoffeeShop` all require a valid access token; the query side does not (see Authentication).
+   `update`/`deleteCoffeeShop` share a `find_coffee_shop`/`NOT_FOUND_ERROR` helper on `BaseMutation`
+   rather than duplicating the not-found lookup and message.
+
+   `createCoffeeShop`'s `address`/`openUntil` arguments are `required: true` (non-null in the schema)
+   — every coffee shop created through the API must have both. `updateCoffeeShop`'s are `required:
+   false`, and deliberately not just "optional" but **preserve-if-blank**: `UpdateCoffeeShop
+   ::PRESERVE_IF_BLANK` names `address`/`open_until`, and `#without_blanks` strips either from the
+   resolved `attrs` before calling `CoffeeShop#update` if its value is `nil` or `""` (checked with
+   `#blank?`, so whitespace-only counts too) — whether that's because the client omitted the argument,
+   explicitly passed `null`, or passed `""`. All three collapse to "leave the existing value alone,"
+   not "blank it out." This is why: `CoffeeShop` itself deliberately does **not** validate presence of
+   `address`/`open_until` (see the model note above) — `CoffeeShopImporter` creates shops with neither,
+   since the CSV feed has no columns for them — so a plain `coffee_shop.update(**attrs)` would happily
+   overwrite a real address with `nil` on any update call that didn't think to resupply it, and
+   `updateCoffeeShop`'s other arguments (`name`/`x`/`y`) already work as a partial update (only
+   supplied keys touch anything) - blank `address`/`openUntil` needed the same treatment specifically
+   *because* they're two of the arguments GraphQL will still let through as `null`/`""` even though the
+   model won't reject either. One edge case `#resolve` has to handle explicitly: if every argument
+   given turns out to be blank, `attrs` ends up `{}` after `#without_blanks`, and
+   `coffee_shop.update(**{})` raises `ArgumentError` (`update` requires at least one argument) rather
+   than being a harmless no-op — `resolve` checks `attrs.empty?` first and treats that case as a
+   trivial success instead of calling `update` at all. `name`/`x`/`y` get no such treatment: a blank
+   `name` is still passed through to `CoffeeShop#update` and rejected by its own `presence` validation,
+   same as before this behavior existed for `address`/`open_until`.
+
    Updating `name`/`x`/`y` does **not** regenerate `slug` — that's the model's existing
    `attr_readonly`/`on: :create`-only behavior (see above), unchanged by mutations.
 
@@ -292,6 +320,116 @@ fixes this: Ruby resolves the outer class via its own (correctly registered) aut
 the whole file and defines the nested error constant as a side effect. If you add another custom error
 class, nest it inside its raising class the same way — don't give it its own top-level file.
 
+**Authentication.** `User` (`app/models/user.rb`) is an ApplicationRecord backed by the `users` table
+(`db/migrate/20260903085407_devise_create_users.rb`): `name`, `email`, `encrypted_password` (all
+`null: false`), unique index on `email`. Uses the `devise` gem, but only for the model layer —
+`devise :database_authenticatable, :validatable` (email format/uniqueness, password length, presence
+validations) — no other devise modules (`:registerable`, `:recoverable`, `:rememberable`, etc.) are
+included since nothing in this app does self-service signup or password reset; add a module only when
+a feature actually needs it. `devise_for :users` is deliberately **not** in `config/routes.rb` — this
+app never mounts Devise's own controllers (sessions/registrations/passwords), since auth is exposed
+exclusively through the two GraphQL mutations below, not REST. Users are provisioned only via
+`bin/rails users:create name=... email=... password=...` (`lib/tasks/users.rake`) — there is no
+self-registration path.
+
+Tokens are JWTs (the `jwt` gem) rather than DB-backed sessions — validating one doesn't require a
+lookup beyond loading the `User` by id — but issuing an *access* token is not fully stateless: see
+`current_access_token_jti` below. `Auth` (`config/initializers/auth.rb`, config-only, mirrors the
+`CoffeeShops` module convention) holds `Auth::JWT_ALGORITHM` (`"HS256"`), `Auth::ACCESS_TOKEN_TTL`
+(3 minutes), and `Auth::REFRESH_TOKEN_TTL` (2 hours) — the single source of truth for both TTLs.
+`JwtEncoder.new(user:, token_type: :access | :refresh).call` (`app/services/jwt_encoder.rb`) signs a
+`{sub:, type:, exp:}` payload with `Auth.jwt_secret` and returns `[token, expires_at]`.
+`Auth.jwt_secret` is `ENV.fetch("JWT_SECRET", Rails.application.secret_key_base)` — same
+env-var-with-a-default pattern as `CoffeeShops.csv_url`, so the JWT signing secret can be rotated
+independently of Rails' own `secret_key_base` without code changes. `JwtDecoder.new(token:,
+expected_type: :access | :refresh).call` (`app/services/jwt_decoder.rb`) verifies the signature and
+expiry, checks the `type` claim matches `expected_type` (an access token cannot be used where a
+refresh token is expected, or vice versa), and loads the `User`, raising the nested
+`JwtDecoder::InvalidTokenError` (see Error convention below) for any failure — bad signature, expired,
+wrong type, a since-deleted user, or a superseded `jti` (see below).
+
+**Access tokens are single-active-token-per-user, enforced via `User#current_access_token_jti`**
+(`db/migrate/20260903103104_add_current_access_token_jti_to_users.rb`, a nullable string). Every time
+`JwtEncoder` issues an *access* token (from either `login` or `refreshToken`), it generates a random
+`SecureRandom.uuid`, unconditionally overwrites `user.current_access_token_jti` with it via
+`update_column`, and embeds the same value as the payload's `jti` claim (RFC 7519's standard "JWT ID"
+field, not a bespoke one) — this is the one place token issuance writes to the database. `JwtDecoder`,
+when `expected_type: :access`, rejects the token unless its `jti` claim equals the user's *current*
+`current_access_token_jti`, so issuing any new access token immediately invalidates every access token
+issued before it for that user — including one from a still-open session on another device, not just
+the caller's own previous token. This was a deliberate fix, not the original design: a user reported
+that refreshing left the old access token still working until its own 3-minute expiry, which is a real
+gap for a token meant to be short-lived-and-replaceable. Refresh tokens carry no `jti` claim and are
+unaffected — they stay valid for their full 2-hour TTL regardless of how many access tokens are minted
+from them.
+
+This landed as a `jti`-per-token design after two earlier iterations, kept here as context for why it
+looks like this rather than the more common denylist-of-revoked-tokens pattern:
+- **First**: an incrementing `token_version` integer, checked as a `ver` claim. Rejected in favor of
+  `jti` because `user.increment!(:token_version)` is a read-modify-write (load the current value, add
+  1, write it back) — not atomic, so concurrent access-token issuance for the same user could lose an
+  update. `jti` avoids this: `update_column` with a freshly generated UUID is an unconditional
+  overwrite, nothing to race on.
+- That iteration also shipped a real bug worth remembering the shape of: `JwtEncoder`'s bump method
+  returned `user.increment!(:token_version)`'s own return value — the `User` object itself, not the new
+  integer — so `payload[:ver]` was briefly a serialized `#<User:0x...>` string. Every access token
+  failed its own version check as a result. Caught immediately by the request specs, not in the wild.
+- A denylist of revoked token IDs (a table, one row per superseded token, checked on every decode) was
+  considered and rejected too — it solves a different problem than what was asked for ("was this
+  specific token revoked?" vs. "is this the latest one?"), needs a cleanup job for entries whose
+  tokens would have expired anyway (this app has no background job infra - see Hard constraints), and
+  adds a query per request beyond the `User` lookup `JwtDecoder` already does. `jti`-on-`User` needs
+  none of that: the comparison piggybacks on the `User.find` already happening, and a stale `jti` is
+  just permanently wrong, not a row to clean up.
+
+`Types::MutationType` (`app/graphql/types/mutation_type.rb`) is the schema's one mutation root, added
+specifically for these two fields — see the "No GraphQL mutations" constraint update below:
+- `login(email: String!, password: String!)` — looks the user up via
+  `User.find_for_authentication(email:)` (devise's canonical, case-insensitive lookup), then
+  `#valid_credentials?` either calls `user.valid_password?(password)` when a user was found, or - when
+  none was - hashes `password` against a fixed dummy bcrypt digest (`MutationType::DUMMY_PASSWORD_DIGEST`)
+  and still returns `false`. That dummy comparison exists solely for timing parity: skipping bcrypt
+  entirely on an unknown email would make a wrong-password response measurably slower than an
+  unknown-email response, letting an attacker enumerate registered emails from response time alone.
+  Either way, failure raises a single generic `GraphQL::ExecutionError, "Invalid email or password"`
+  (never reveals whether the email or the password was wrong). On success returns
+  `Types::AuthPayloadType`: `accessToken`/`accessTokenExpiresAt` and `refreshToken`/`refreshTokenExpiresAt`.
+- `refreshToken(refreshToken: String!)` — decodes the given token via `JwtDecoder` with
+  `expected_type: :refresh`, then mints a brand-new access token for that user. Returns
+  `Types::RefreshPayloadType`: just `accessToken`/`accessTokenExpiresAt` — it does not rotate or
+  re-return the refresh token, per the original request ("the refresh EP to refresh the access token").
+  `JwtDecoder::InvalidTokenError` is caught here and re-raised as `GraphQL::ExecutionError`.
+
+**Only the `CoffeeShop` CRUD mutations require authentication — search is deliberately public.**
+`coffeeShops`/`coffeeShop`/`nearestCoffeeShops` (`Types::QueryType`) and `login`/`refreshToken`
+(`Types::MutationType`) take no token at all; `createCoffeeShop`/`updateCoffeeShop`/`deleteCoffeeShop`
+(`Mutations::CreateCoffeeShop`/`UpdateCoffeeShop`/`DeleteCoffeeShop`) each require a valid one. This
+was a deliberate, explicit instruction ("guard the CRUD functionality with authentication and leave
+free the search endpoints") reversing an earlier version of this feature that gated the query fields
+instead — don't put `authenticate!` back on `Types::QueryType` without checking this is still what's
+wanted, and don't assume "coffeeShops needs a token" from an old branch/comment/memory of this feature.
+`Mutations::BaseMutation#authenticate!` (`app/graphql/mutations/base_mutation.rb`) raises
+`GraphQL::ExecutionError, "Unauthorized"` when `context[:current_user]` is blank; each of the three
+CRUD mutations' `#resolve` calls it as its first line, the same explicit-method-call pattern
+`Types::QueryType` briefly used for its own fields (see below for why that was a type-level
+`self.authorized?` override instead, and why that was rejected — the same reasoning is why the CRUD
+mutations use an explicit per-mutation call too, not a `Mutations::BaseMutation.authorized?` override).
+`GraphqlController#execute` (`app/controllers/graphql_controller.rb`) always populates
+`context[:current_user]` the same way for every request, regardless of which field (if any) ends up
+checking it: it reads an `Authorization: Bearer <token>` header, decodes it with `expected_type:
+:access`, and sets the user if that succeeds — swallowing `JwtDecoder::InvalidTokenError` into `nil`
+rather than raising, so a missing or invalid token reaches `authenticate!` as "no current user" (a
+clean GraphQL error) instead of blowing up in the controller.
+
+A type-level `self.authorized?` override (on either `Types::QueryType` or `Mutations::BaseMutation`)
+was deliberately avoided, not just not-yet-added: it was tried on `Types::QueryType` during this
+feature's first iteration and confirmed (via a direct `CoffeeShopsApiSchema.execute` call) to also gate
+`__schema`/`__type` introspection, since those resolve as fields on that same root type — it made
+introspection itself return `{"errors"=>[{"message"=>"Unauthorized"}]}` regardless of token, breaking
+GraphiQL's schema explorer for every user. Introspection fields live on the query root, not the
+mutation root, so this specific failure mode wouldn't recur for `Mutations::BaseMutation` — but the
+explicit-call pattern was kept there anyway for consistency, not reintroduced as a type-level hook.
+
 **Hard constraints for this codebase** (do not reintroduce without discussion):
 - No Geocoder, PostGIS, or other geospatial gem/extension — nearest-shop distance is a flat 2D
   Euclidean calculation done in plain SQL (`SQRT(POWER(...))`) inside `NearestCoffeeShopsFinder`, not
@@ -299,6 +437,8 @@ class, nest it inside its raising class the same way — don't give it its own t
 - No CSV-parsing gem — stdlib `CSV` only.
 - No dotenv — env vars are read directly via `ENV.fetch`.
 - No REST API — GraphQL (`POST /graphql`) is the only live interface, for reads and writes alike; see
-  above. CRUD is implemented as GraphQL mutations (`createCoffeeShop`/`updateCoffeeShop`/
-  `deleteCoffeeShop`, see above), deliberately chosen over reintroducing REST specifically to keep this
-  single-interface property rather than maintaining two parallel APIs for the same model.
+  above. `CoffeeShop` CRUD is implemented as GraphQL mutations (`createCoffeeShop`/`updateCoffeeShop`/
+  `deleteCoffeeShop`, see Mutations above), deliberately chosen over reintroducing REST specifically to
+  keep this single-interface property rather than maintaining two parallel APIs for the same model.
+  `login`/`refreshToken` (see Authentication above) mount on the same `Types::MutationType` root for the
+  same reason, not because it's an auth-specific carve-out.
