@@ -21,14 +21,14 @@ module Mutations
     def resolve(**attrs)
       authenticate!
       errors = blank_argument_errors(attrs)
-      return { coffee_shop: nil, errors: errors } if errors.any?
+      raise GraphQL::ExecutionError, errors if errors.any?
 
       coffee_shop = CoffeeShop.new(**attrs)
 
       if coffee_shop.save
         { coffee_shop: coffee_shop, errors: [] }
       else
-        { coffee_shop: nil, errors: coffee_shop.errors.full_messages }
+        raise GraphQL::ExecutionError, coffee_shop.errors.full_messages.join('; ')
       end
     end
 

@@ -10,7 +10,7 @@ module Mutations
     def resolve(id:)
       authenticate!
       coffee_shop = find_coffee_shop(id)
-      return { coffee_shop: nil, errors: [ NOT_FOUND_ERROR ] } unless coffee_shop
+      raise GraphQL::ExecutionError, NOT_FOUND_ERROR unless coffee_shop
 
       coffee_shop.destroy
       { coffee_shop: coffee_shop, errors: [] }

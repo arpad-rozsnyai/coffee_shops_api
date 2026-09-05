@@ -20,7 +20,7 @@ module Mutations
     def resolve(id:, **attrs)
       authenticate!
       coffee_shop = find_coffee_shop(id)
-      return { coffee_shop: nil, errors: [ NOT_FOUND_ERROR ] } unless coffee_shop
+      raise GraphQL::ExecutionError, NOT_FOUND_ERROR unless coffee_shop
 
       attrs = without_blanks(attrs)
       # update(**{}) raises ArgumentError (it requires at least one argument) - nothing left to
@@ -28,7 +28,7 @@ module Mutations
       if attrs.empty? || coffee_shop.update(**attrs)
         { coffee_shop: coffee_shop, errors: [] }
       else
-        { coffee_shop: nil, errors: coffee_shop.errors.full_messages }
+        raise GraphQL::ExecutionError, coffee_shop.errors.full_messages.join('; ')
       end
     end
 
