@@ -287,10 +287,12 @@ otherwise). GraphQL's own `Float!` argument coercion is what actually validates 
 **GraphiQL (development only):** `GET /graphiql` mounts `GraphiQL::Rails::Engine`
 (`config/routes.rb`, guarded by `if Rails.env.development?` — confirmed absent from
 `Rails.application.routes.routes` under `RAILS_ENV=production`), the interactive explorer, as the
-Swagger-UI replacement. It needs Sprockets (`sprockets-rails` + `graphiql-rails`, both
-`group :development` in the `Gemfile` — this app otherwise has no asset pipeline). Two things that
-will bite you if touched carelessly:
-- **Gemfile order matters:** `sprockets-rails` must be listed *before* `graphiql-rails`.
+Swagger-UI replacement. It needs Sprockets (`sprockets-rails` + `graphiql-rails`). `sprockets-rails`
+itself is no longer `group :development` in the `Gemfile` — ActiveAdmin (see below) also needs the
+asset pipeline, in every environment, not just development — but `graphiql-rails` stays
+`group :development` since GraphiQL itself is still dev-only. Two things that will bite you if
+touched carelessly:
+- **Gemfile order matters:** `sprockets-rails` must still be listed *before* `graphiql-rails`.
   `graphiql-rails`'s engine (`lib/graphiql/rails/engine.rb`) only registers its assets for
   precompilation if `Sprockets` is already `defined?` at load time; `Bundler.require` loads gems in
   Gemfile declaration order, so getting this backwards makes it silently fall back to serving from an
@@ -312,6 +314,11 @@ entirely, with no backward-compatibility shim kept. **`CsvClient` and `CsvParser
 `CoffeeShopImporter`/the import rake task, which is how the table GraphQL reads from gets populated.
 Only `CoffeeShopRepository` (a thin `parser.parse(client.fetch)` wrapper that existed solely to feed
 the old request-time CSV pipeline) was genuinely orphaned and removed along with REST.
+
+This doesn't conflict with ActiveAdmin (see below) being added later: ActiveAdmin is a server-rendered
+HTML admin UI for humans, not a REST JSON API for programmatic clients — it doesn't reintroduce
+`Api::V1::CoffeeShopsController`, JSON:API responses, or a second machine-facing interface. GraphQL
+remains the only *API*.
 
 **Namespacing convention:** `CoffeeShops` (plural module, `config/initializers/coffee_shops.rb`) is
 config-only — `CoffeeShops.csv_url` and the `CoffeeShops::DEFAULT_LIMIT` constant. Everything under
@@ -469,15 +476,78 @@ even ignoring introspection: `nearest_coffee_shops` must stay public while `coff
 don't, and `self.authorized?` gates the whole type, not individual fields — per-field method calls are
 the only way to express "some fields on this type need a token, one doesn't."
 
+**ActiveAdmin (admin UI, `/admin`).** A second, human-facing surface for managing `CoffeeShop`
+records, added on top of everything above — GraphQL is still the only *API*, this is a server-rendered
+HTML UI, not a REST JSON API, so it doesn't reopen the "REST API removed" decision above (see that
+section's note). It's registered in `app/admin/coffee_shop.rb` and reuses the same `User` table/model
+that authenticates GraphQL callers, just via a Devise **session** instead of a JWT — there is no
+separate `AdminUser` model. This is the only thing in the app using session-based auth; GraphQL's
+JWT flow (above) is untouched by any of this.
+
+Because the rest of this app is API-only (see the controller-ancestry note below), several pieces
+were added specifically to make a full-stack, cookie/session-based UI coexist with it:
+- `config/application.rb` adds back the session/cookie/flash/method-override middleware that
+  `config.api_only = true` strips out by default — the standard, Rails-guide-documented way to do
+  this selectively rather than dropping `api_only` altogether.
+- `config/routes.rb` adds `devise_for :users` (session sign-in/sign-out only — `User` only includes
+  the `:database_authenticatable`/`:validatable` Devise modules, so that's all devise_for generates;
+  no registration/password-recovery routes exist) and `ActiveAdmin.routes(self)`.
+- **`ApplicationController` is now `< ActionController::Base`, not `< ActionController::API`.** This
+  isn't optional: ActiveAdmin's controllers inherit `ActiveAdmin::BaseController <
+  InheritedResources::Base`, and `inherited_resources` hardcodes `class Base < ::ApplicationController`
+  — that top-level constant, whatever it resolves to in the host app. A `helper_method` call in that
+  gem file crashes at load time (`NoMethodError`, confirmed by actually trying it) if
+  `ApplicationController` is API-only, since `ActionController::API` has no view/helper layer.
+  `GraphqlController` opts back out and inherits `ActionController::API` directly instead of going
+  through `ApplicationController` — the same "bypass when you need a different stack" pattern
+  `HomeController` already used the other way around before this change (it used to inherit
+  `ActionController::Base` directly for exactly the same reason `ApplicationController` was
+  API-only; now that `ApplicationController` itself is Base-derived, `HomeController` inherits it
+  normally again, no bypass needed).
+- `spec/rails_helper.rb` includes `Devise::Test::IntegrationHelpers` for `type: :request` specs, so
+  `sign_in`/`sign_out` work in `spec/requests/admin/coffee_shops_spec.rb`.
+
+Only one resource is registered: `ActiveAdmin.register CoffeeShop`. It deliberately enables just
+`:index, :new, :create, :edit, :update, :destroy` — no `:show` — so the index's actions column is
+exactly `Edit`/`Delete` (ActiveAdmin adds a "View" link automatically when `:show` exists, which
+wasn't asked for). The index columns are `id`/`name`/`x`/`y` plus `actions`; `x`/`y` are rendered via
+a block (`column("X", sortable: :coordinate_x, &:x)`) because they're `alias_attribute`s, not real
+columns — `sortable:` points ActiveAdmin's own SQL-based `OrderClause` at the real `coordinate_x`/
+`coordinate_y` column names it actually knows about. Search is deliberately narrowed to `filter :id`
+and `filter :name` (once you declare any explicit `filter`, ActiveAdmin stops auto-generating one
+per attribute) — matching exactly what was asked for, nothing broader. `CoffeeShop.ransackable_attributes`
+(`app/models/coffee_shop.rb`) allowlists just `id`/`name` for the same reason and because Ransack 4's
+mass-assignment safelist requires an explicit allowlist before any attribute is searchable at all;
+GraphQL never touches Ransack, so this is purely for the admin filters. `config.batch_actions = false`
+in `config/initializers/active_admin.rb` turns off ActiveAdmin's default bulk "Delete Selected" — only
+a single, confirmed per-row delete was asked for, so the extra bulk-destroy affordance was removed
+rather than left at the generator's default.
+
+`address`/`open_until` are required in this UI's create/edit forms, but — deliberately, mirroring the
+GraphQL mutation precedent above — this is **not** a `CoffeeShop` model validation, for the same reason
+already established there: `CoffeeShopImporter` creates CSV-imported shops with both `nil` and that
+must keep working, and this file already records that a model-level validation here (even a
+`nil`-safe, blank-only one) was tried and rejected once. `app/admin/coffee_shop.rb`'s `controller do`
+block overrides `create_resource`/`update_resource` (`inherited_resources` hooks that wrap the actual
+`object.save`/`object.update` call) to check for blank `address`/`open_until` and, if either is blank,
+add `errors` and return `false` *without* ever calling `save`/`update` — short-circuiting before the
+model's own save path runs, the same shape as `Mutations::CreateCoffeeShop#blank_argument_errors`.
+This is why it can't be a normal ActiveAdmin `before_create`/`before_save` DSL callback instead: those
+run immediately before the gem's own `object.save`, and `errors.add`ing there gets silently wiped out
+by `save`'s internal `valid?` call before it ever reaches the response — confirmed by reading
+`inherited_resources`' and ActiveAdmin's own callback source, not by assumption.
+
 **Hard constraints for this codebase** (do not reintroduce without discussion):
 - No Geocoder, PostGIS, or other geospatial gem/extension — nearest-shop distance is a flat 2D
   Euclidean calculation done in plain SQL (`SQRT(POWER(...))`) inside `NearestCoffeeShopsFinder`, not
   Ruby (`CoffeeShop#distance_to`/`Math.hypot` were removed once the calculation moved into the DB).
 - No CSV-parsing gem — stdlib `CSV` only.
 - No dotenv — env vars are read directly via `ENV.fetch`.
-- No REST API — GraphQL (`POST /graphql`) is the only live interface, for reads and writes alike; see
-  above. `CoffeeShop` CRUD is implemented as GraphQL mutations (`createCoffeeShop`/`updateCoffeeShop`/
-  `deleteCoffeeShop`, see Mutations above), deliberately chosen over reintroducing REST specifically to
-  keep this single-interface property rather than maintaining two parallel APIs for the same model.
-  `login`/`refreshToken` (see Authentication above) mount on the same `Types::MutationType` root for the
-  same reason, not because it's an auth-specific carve-out.
+- No REST *API* — GraphQL (`POST /graphql`) is the only live programmatic interface, for reads and
+  writes alike; see above. `CoffeeShop` CRUD is implemented as GraphQL mutations
+  (`createCoffeeShop`/`updateCoffeeShop`/`deleteCoffeeShop`, see Mutations above), deliberately chosen
+  over reintroducing REST specifically to keep this single-interface property rather than maintaining
+  two parallel APIs for the same model. `login`/`refreshToken` (see Authentication above) mount on the
+  same `Types::MutationType` root for the same reason, not because it's an auth-specific carve-out.
+  ActiveAdmin (see above) is the one deliberate exception to "single interface" — it's a human-facing
+  HTML UI, not a second API, so it doesn't count against this constraint.

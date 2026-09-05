@@ -61,6 +61,9 @@ RSpec.configure do |config|
   # Allows `travel_to`/`travel`/`freeze_time` in specs (used to test JWT expiry).
   config.include ActiveSupport::Testing::TimeHelpers
 
+  # Allows `sign_in`/`sign_out` in request specs (used by ActiveAdmin specs).
+  config.include Devise::Test::IntegrationHelpers, type: :request
+
   # Filter lines from Rails gems in backtraces.
   config.filter_rails_from_backtrace!
   # arbitrary gems may also be filtered via:
