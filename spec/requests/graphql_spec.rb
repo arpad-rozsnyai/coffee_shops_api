@@ -14,11 +14,11 @@ RSpec.describe "POST /graphql", type: :request do
   # A stand-in for "a request that needs authentication" in the login/refreshToken specs below -
   # createCoffeeShop is one of several protected resources now, kept as the probe since it needed no
   # changes when coffeeShops/coffeeShop switched from public back to guarded.
-  def create_coffee_shop_graphql(headers:)
+  def create_coffee_shop_graphql(headers:, name: "Probe")
     post "/graphql", params: {
       query: "mutation($name: String!, $x: Float!, $y: Float!, $address: String!, $openUntil: String!) { " \
         "createCoffeeShop(name: $name, x: $x, y: $y, address: $address, openUntil: $openUntil) { errors } }",
-      variables: { name: "Probe", x: 0, y: 0, address: "123 Main St", openUntil: "9pm" }.to_json
+      variables: { name: name, x: 0, y: 0, address: "123 Main St", openUntil: "9pm" }.to_json
     }, headers: headers
   end
 
@@ -871,7 +871,7 @@ RSpec.describe "POST /graphql", type: :request do
       expect(response.parsed_body["errors"]).to be_present
       expect(response.parsed_body.dig("data", "createCoffeeShop")).to be_nil
 
-      create_coffee_shop_graphql(headers: { "Authorization" => "Bearer #{new_access_token}" })
+      create_coffee_shop_graphql(headers: { "Authorization" => "Bearer #{new_access_token}" }, name: "Probe 2")
       expect(response.parsed_body["errors"]).to be_nil
     end
 

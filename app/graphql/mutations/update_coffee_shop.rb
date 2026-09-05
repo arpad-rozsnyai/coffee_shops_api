@@ -28,7 +28,7 @@ module Mutations
       if attrs.empty? || coffee_shop.update(**attrs)
         { coffee_shop: coffee_shop, errors: [] }
       else
-        raise GraphQL::ExecutionError, coffee_shop.errors.full_messages.join('; ')
+        raise GraphQL::ExecutionError, coffee_shop.errors.full_messages.join("; ")
       end
     end
 

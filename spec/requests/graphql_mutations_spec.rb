@@ -67,9 +67,8 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
     it "returns validation errors and creates nothing when name is blank" do
       post_graphql(create_mutation, variables: { name: "", x: 1.0, y: 2.0, address: "123 Main St", openUntil: "9pm" })
 
-      payload = response.parsed_body.dig("data", "createCoffeeShop")
-      expect(payload["coffeeShop"]).to be_nil
-      expect(payload["errors"]).to be_present
+      expect(response.parsed_body.dig("data", "createCoffeeShop")).to be_nil
+      expect(response.parsed_body.dig("errors", 0, "message")).to include("Name can't be blank")
       expect(CoffeeShop.count).to eq(0)
     end
 
@@ -78,9 +77,8 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
         name: "Test3", x: 1.0, y: 2.0, address: "123 Main St", openUntil: ""
       })
 
-      payload = response.parsed_body.dig("data", "createCoffeeShop")
-      expect(payload["coffeeShop"]).to be_nil
-      expect(payload["errors"]).to eq([ "Open until can't be blank" ])
+      expect(response.parsed_body.dig("data", "createCoffeeShop")).to be_nil
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Open until can't be blank")
       expect(CoffeeShop.count).to eq(0)
     end
 
@@ -89,17 +87,15 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
         name: "Test3", x: 1.0, y: 2.0, address: "   ", openUntil: "9pm"
       })
 
-      payload = response.parsed_body.dig("data", "createCoffeeShop")
-      expect(payload["coffeeShop"]).to be_nil
-      expect(payload["errors"]).to eq([ "Address can't be blank" ])
+      expect(response.parsed_body.dig("data", "createCoffeeShop")).to be_nil
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Address can't be blank")
       expect(CoffeeShop.count).to eq(0)
     end
 
     it "returns both errors when address and openUntil are both blank" do
       post_graphql(create_mutation, variables: { name: "Test3", x: 1.0, y: 2.0, address: "", openUntil: "" })
 
-      payload = response.parsed_body.dig("data", "createCoffeeShop")
-      expect(payload["errors"]).to contain_exactly("Address can't be blank", "Open until can't be blank")
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Address can't be blank; Open until can't be blank")
       expect(CoffeeShop.count).to eq(0)
     end
 
@@ -120,9 +116,8 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
         name: "Starbucks", x: 1.0, y: 2.0, address: "123 Main St", openUntil: "9pm"
       })
 
-      payload = response.parsed_body.dig("data", "createCoffeeShop")
-      expect(payload["coffeeShop"]).to be_nil
-      expect(payload["errors"]).to eq([ CoffeeShop::DUPLICATE_ERROR_MESSAGE ])
+      expect(response.parsed_body.dig("data", "createCoffeeShop")).to be_nil
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq(CoffeeShop::DUPLICATE_ERROR_MESSAGE)
       expect(CoffeeShop.count).to eq(1)
     end
 
@@ -220,9 +215,8 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
     it "returns an error and does not update when the id does not exist" do
       post_graphql(update_mutation, variables: { id: 0, name: "Anything" })
 
-      payload = response.parsed_body.dig("data", "updateCoffeeShop")
-      expect(payload["coffeeShop"]).to be_nil
-      expect(payload["errors"]).to eq([ "Coffee shop not found" ])
+      expect(response.parsed_body.dig("data", "updateCoffeeShop")).to be_nil
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Coffee shop not found")
     end
 
     it "returns validation errors and does not persist an invalid update" do
@@ -230,9 +224,8 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
 
       post_graphql(update_mutation, variables: { id: shop.id, name: "" })
 
-      payload = response.parsed_body.dig("data", "updateCoffeeShop")
-      expect(payload["coffeeShop"]).to be_nil
-      expect(payload["errors"]).to be_present
+      expect(response.parsed_body.dig("data", "updateCoffeeShop")).to be_nil
+      expect(response.parsed_body.dig("errors", 0, "message")).to be_present
       expect(shop.reload.name).to eq("Starbucks")
     end
 
@@ -283,9 +276,8 @@ RSpec.describe "POST /graphql (mutations)", type: :request do
     it "returns an error and deletes nothing when the id does not exist" do
       post_graphql(delete_mutation, variables: { id: 0 })
 
-      payload = response.parsed_body.dig("data", "deleteCoffeeShop")
-      expect(payload["coffeeShop"]).to be_nil
-      expect(payload["errors"]).to eq([ "Coffee shop not found" ])
+      expect(response.parsed_body.dig("data", "deleteCoffeeShop")).to be_nil
+      expect(response.parsed_body.dig("errors", 0, "message")).to eq("Coffee shop not found")
     end
   end
 
