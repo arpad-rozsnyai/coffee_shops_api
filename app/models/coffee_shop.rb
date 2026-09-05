@@ -15,6 +15,11 @@ class CoffeeShop < ApplicationRecord
 
   scope :name_contains, ->(fragment) { where(arel_table[:name].matches("%#{sanitize_sql_like(fragment)}%")) }
 
+  # Ransack's mass-assignment safelist - used only by the ActiveAdmin filters (app/admin/coffee_shop.rb).
+  def self.ransackable_attributes(_auth_object = nil)
+    %w[id name]
+  end
+
   private
 
   # Coordinate signs are encoded explicitly (see #signed_component) because plain #parameterize strips

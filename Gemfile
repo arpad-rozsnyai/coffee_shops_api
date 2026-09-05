@@ -59,8 +59,15 @@ end
 
 gem "graphql", "~> 2.6"
 
+# Asset pipeline — needed in every environment (not just development) because ActiveAdmin's
+# admin UI (see below) is a real, production-served interface, unlike GraphiQL below which is
+# development-only. Order matters relative to graphiql-rails — see CLAUDE.md's GraphiQL section.
+gem "sprockets-rails"
+
+# Admin UI for managing coffee shops [https://github.com/activeadmin/activeadmin]
+gem "activeadmin", "~> 3.5"
+gem "sassc-rails"
+
 group :development do
-  # Order matters here — see CLAUDE.md's GraphiQL section.
-  gem "sprockets-rails"
   gem "graphiql-rails"
 end

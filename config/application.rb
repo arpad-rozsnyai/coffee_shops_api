@@ -39,5 +39,13 @@ module CoffeeShopsApi
     # Middleware like session, flash, cookies can be added back manually.
     # Skip views, helpers and assets when generating a new resource.
     config.api_only = true
+
+    # ActiveAdmin (see app/admin/) needs the session/cookie/flash/method-override middleware
+    # config.api_only strips out by default.
+    config.session_store :cookie_store, key: "_coffee_shops_api_session"
+    config.middleware.use ActionDispatch::Cookies
+    config.middleware.use config.session_store, config.session_options
+    config.middleware.use Rack::MethodOverride
+    config.middleware.use ActionDispatch::Flash
   end
 end
