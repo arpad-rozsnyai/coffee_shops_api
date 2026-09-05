@@ -4,6 +4,8 @@ module Types
 
     field :coffee_shop, Types::CoffeeShopType, null: false
     field :distance, Float, null: false
+    field :highlighted, Boolean, null: false,
+      description: "True for the top results of a nearestCoffeeShops search; false otherwise"
 
     def coffee_shop
       object[:coffee_shop]
@@ -11,6 +13,10 @@ module Types
 
     def distance
       object[:distance].round(4)
+    end
+
+    def highlighted
+      object[:highlighted]
     end
   end
 end
